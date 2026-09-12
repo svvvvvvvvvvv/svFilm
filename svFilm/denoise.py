@@ -56,28 +56,34 @@ def apply(disp, cfg):
 
     R = int(getattr(cfg, 'DENOISE_RADIUS', 4))
     eps = float(getattr(cfg, 'DENOISE_EPS', 90.0))
-    k_l = float(np.clip(getattr(cfg, 'DENOISE_LUMA', 0.45), 0.0, 1.0))
-    k_c = float(np.clip(getattr(cfg, 'DENOISE_CHROMA', 0.85), 0.0, 1.0))
+    k_l = float(np.clip(getattr(cfg, 'DENOISE_LUMA', 0.50), 0.0, 1.0))
+    k_c = float(np.clip(getattr(cfg, 'DENOISE_CHROMA', 0.90), 0.0, 1.0))
 
     lab = color.to_lab(np.clip(disp, 0.0, 1.0))
     L = lab[..., 0].astype(np.float32)
 
-    # 掩膜：暗部 × 平坦区。两样都满足才全量下手，任一条不满足就淡出。
+    # 亮度掩膜：暗部（L* 低）才有噪点；高光本来就干净，别去动皮肤高光
     w_dark = 1.0 - color.smoothstep(L, cfg.DENOISE_DARK_LO, cfg.DENOISE_DARK_HI)
+
+    # 平坦掩膜分两套：亮度怕糊细节（门槛紧），色度只管色斑（门槛松）。
+    # 为什么分开：a*/b* 的噪点本身不产生 L* 梯度，用亮度的边缘门槛去卡色度会"该降的降不了"。
     mag = _grad_mag(L)
-    w_flat = 1.0 - color.smoothstep(mag, cfg.DENOISE_EDGE_LO, cfg.DENOISE_EDGE_HI)
-    w = (w_dark * w_flat).astype(np.float32)
+    w_flat_l = 1.0 - color.smoothstep(mag, cfg.DENOISE_EDGE_LO, cfg.DENOISE_EDGE_HI)
+    w_flat_c = 1.0 - color.smoothstep(mag, cfg.DENOISE_EDGE_LO_C, cfg.DENOISE_EDGE_HI_C)
+    w_l = (w_dark * w_flat_l).astype(np.float32)
+    w_c = (w_dark * w_flat_c).astype(np.float32)
 
     # 亮度：自引导（eps 大一点 ⇒ 更保结构），只补一点点
     Ls = _guided(L, L, R, eps)
-    lab[..., 0] = L + (k_l * w) * (Ls - L)
+    lab[..., 0] = L + (k_l * w_l) * (Ls - L)
     # 色度：以 L* 为引导（色斑要贴着结构平滑，但不能跨边缘串色）
     for ch in (1, 2):
         ch_in = lab[..., ch].astype(np.float32)
         cs = _guided(L, ch_in, R, eps)
-        lab[..., ch] = ch_in + (k_c * w) * (cs - ch_in)
+        lab[..., ch] = ch_in + (k_c * w_c) * (cs - ch_in)
 
     out = np.clip(color.from_lab(lab), 0.0, 1.0)
     info = dict(applied=True, radius=R, luma=k_l, chroma=k_c,
-                mask_mean=float(w.mean()), mask_max=float(w.max()))
+                mask_mean=float(w_c.mean()), mask_luma_mean=float(w_l.mean()),
+                mask_max=float(w_c.max()))
     return out, info

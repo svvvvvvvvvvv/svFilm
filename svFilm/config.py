@@ -102,10 +102,10 @@ BASE_TABLE = {
         b=0.0, chroma_p=1.0, chroma_s=1.0, contrast=1.0, fog=0.0063),
     'BASE_DEYELLOW': dict(
         label='② 退黄+加雾', desc='在①之上把整体黄味从 +3.3 收到 +1 左右（画面明显"没那么黄"）',
-        b=-2.26, chroma_p=1.0, chroma_s=1.0, contrast=1.0, fog=0.0063),
+        b=-1.90, chroma_p=1.0, chroma_s=1.0, contrast=1.0, fog=0.0063),
     'BASE_FULL': dict(
         label='③ 全对齐', desc='在②之上收彩度形状（高彩不再冲那么猛）+彩度略提+反差略增，最接近大师平均',
-        b=-2.26, chroma_p=0.849, chroma_s=1.059, contrast=1.30, fog=0.0063),
+        b=-1.90, chroma_p=0.770, chroma_s=1.150, contrast=1.35, fog=0.0085),
 }
 
 # ========== 降噪（RAW 提亮后暗部色斑/噪点） ==========
@@ -113,12 +113,14 @@ BASE_TABLE = {
 # 原则：只在"暗部 + 平坦区"下手，边缘/细节区不动；用引导滤波（保边）逐通道做，
 #       加回的量按掩膜加权 ⇒ 近似零均值 ⇒ 中灰/黑位几乎不漂移（selftest 有这条不变量）。
 DENOISE_ENABLE = False
-DENOISE_LUMA = 0.45             # 亮度通道降噪强度（0~1，会吃掉一点细节，别给大）
-DENOISE_CHROMA = 0.85           # 色度通道降噪强度（色斑主要在这，可以给大）
-DENOISE_DARK_LO = 0.00          # 掩膜：L* 低于此 = 全量降噪（暗部噪点最脏）
-DENOISE_DARK_HI = 45.0          # 掩膜：L* 高于此 = 不降噪（亮部本来就干净）
-DENOISE_EDGE_LO = 4.0           # 掩膜：L* 梯度低于此 = 判为平坦区（全量降噪）
-DENOISE_EDGE_HI = 14.0          # 掩膜：梯度高于此 = 判为边缘/纹理（不降噪）
+DENOISE_LUMA = 0.50             # 亮度通道降噪强度（0~1，会吃掉一点细节，别给大）
+DENOISE_CHROMA = 0.90           # 色度通道降噪强度（色斑主要在这，可以给大）
+DENOISE_DARK_LO = 55.0          # 掩膜：L* 低于此 = 全量降噪（暗部/中间调噪点最脏）
+DENOISE_DARK_HI = 90.0          # 掩膜：L* 高于此 = 不降噪（高光本来就干净，别动皮肤高光）
+DENOISE_EDGE_LO = 4.0           # 亮度掩膜：L* 梯度低于此 = 平坦区（全量降噪）
+DENOISE_EDGE_HI = 18.0          # 亮度掩膜：梯度高于此 = 边缘/纹理（不降噪，别糊细节）
+DENOISE_EDGE_LO_C = 12.0        # 色度掩膜同义（门槛更松）：色斑不产生 L* 梯度，卡太紧就白降了
+DENOISE_EDGE_HI_C = 45.0
 DENOISE_RADIUS = 4              # 引导滤波半径 px（@2048 长边）
 DENOISE_EPS = 90.0              # 引导滤波 eps（L* 域，越大越平滑/越糊边）
 

@@ -134,9 +134,13 @@ def _builtin(disp, cfg, stock=None, base=None):
         lab[..., 2] = b2 * k
 
     if has_contrast:
+        # S 形：以中灰为支点（u=0.5 处 sin=0 不动），暗部压下去、亮部提上来，两端点不动。
+        # ⚠ 符号：+a·sin(2πu) 在暗部（u<0.5）是**加**值 ⇒ 那是"降对比"。
+        #   要"加对比"必须**减**。这里曾经写成加号，导致所有卷的 contrast 方向反了
+        #   （标定算出的 contrast>1 = 这条线反差比大师大，落地却在降对比）。
         a = float(np.clip((p['contrast'] - 1.0) * 0.15, -0.10, 0.12))
         u = np.clip(lab[..., 0] / 100.0, 0.0, 1.0)
-        lab[..., 0] = np.clip(u + a * np.sin(2.0 * np.pi * u), 0.0, 1.0) * 100.0
+        lab[..., 0] = np.clip(u - a * np.sin(2.0 * np.pi * u), 0.0, 1.0) * 100.0
 
     return np.clip(color.from_lab(lab), 0.0, 1.0)
 

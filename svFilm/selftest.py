@@ -9,8 +9,8 @@ import tempfile
 
 import numpy as np
 
-from . import (analyze, color, config as C, guard, io, local, pipeline, spatial,
-               stocks, style, tone)
+from . import (analyze, color, config as C, denoise, guard, io, local, metrics,
+               pipeline, spatial, stocks, style, tone)
 
 FAIL = []
 
@@ -19,6 +19,25 @@ def check(name, cond, extra=''):
     print(('  ok   ' if cond else '  FAIL ') + name + (('   ' + extra) if extra else ''))
     if not cond:
         FAIL.append(name)
+
+
+class _Cfg:
+    """config 的只读副本 + 覆盖几项 —— 给"开关类"测试用，不动全局 config。"""
+
+    def __init__(self, **kw):
+        self._d = {k: getattr(C, k) for k in dir(C) if k.isupper()}
+        self._d.update(kw)
+
+    def __getattr__(self, k):
+        try:
+            return self._d[k]
+        except KeyError:
+            raise AttributeError(k)
+
+
+def _span90(disp):
+    L = color.to_lab(np.clip(disp, 0, 1))[..., 0]
+    return float(np.percentile(L, 95) - np.percentile(L, 5))
 
 
 def _gray_img(h=240, w=360, gamma=0.45, seed=0, tint=(1.0, 1.0, 1.0)):
@@ -109,6 +128,96 @@ def t_style_lock():
           '%.4f -> %.4f' % (ref, style.mid_of(out)))
     out2, _ = style.apply(d, C, lock_ref=None)
     check('lock_ref=None 时不锁', True, 'ev=%.4f' % info['lock_ev'])
+
+
+def t_style_contrast_direction():
+    """contrast 的**方向**必须对：>1 = 加对比，<1 = 降对比，中灰不动。
+
+    这条是踩过坑加的：曾经把 S 形的符号写反（+a·sin 实际在降对比），
+    结果路 B 标定算出来的"这条线反差比大师大"全被落地成了"降对比"。
+    """
+    print('[L2 对比：方向与支点]')
+    d = _gray_img(gamma=1.0)
+    s0 = _span90(d)
+
+    up, _ = style.apply(d, _Cfg(CONTRAST=1.35), lock_ref=None)
+    s1 = _span90(up)
+    check('contrast>1 = 加对比（反差变大）', s1 > s0 + 1.0, '%.1f -> %.1f' % (s0, s1))
+    # 支点是 L*=50 那一点（u=0.5 处 sin=0），不是"这张图的中位"—— 用纯色块验最干净
+    flat = color.from_lab(np.array([[[50.0, 0.0, 0.0]]]))
+    L50 = float(color.to_lab(style.apply(flat, _Cfg(CONTRAST=1.35), lock_ref=None)[0])[0, 0, 0])
+    check('支点是 L*=50（纯色块不动）', abs(L50 - 50.0) < 0.5, '50.00 -> %.2f' % L50)
+
+    dn, _ = style.apply(d, _Cfg(CONTRAST=0.70), lock_ref=None)
+    s2 = _span90(dn)
+    check('contrast<1 = 降对比（反差变小）', s2 < s0 - 1.0, '%.1f -> %.1f' % (s0, s2))
+
+    check('contrast=1.0 时完全不动',
+          float(np.max(np.abs(style.apply(d, _Cfg(CONTRAST=1.0), lock_ref=None)[0] - d))) < 1e-9)
+
+
+def _hp_std(x):
+    """高通道方差 = 噪点量（灰度 0~255 口径），跟 metrics 的 noise 一个意思。"""
+    g = color.gray_of(np.clip(x, 0, 1)) * 255.0
+    k = np.ones((9, 9), np.float32) / 81.0
+    import cv2
+    b = cv2.blur(g.astype(np.float32), (9, 9))
+    return float((g - b).std())
+
+
+def t_denoise():
+    """降噪：默认关=恒等；开着时暗块噪点真下降、亮块不动、硬边保留；近似零均值。
+
+    ⚠ 关于"黑位漂移"：在**带噪点**的暗部，P0.2 是噪声驱动的极值，降噪把噪声抹掉后
+    极值**必然**抬高 —— 那是降噪的定义，不是"平白提黑"。所以这条不变量的正确问法是：
+      ① 均值 / 中位（内容所在）不漂；
+      ② 在**没有噪点**的暗块上，黑位不漂。
+    """
+    print('[降噪]')
+    rng = np.random.default_rng(7)
+    # 三块**平坦**色（暗 / 中 / 亮）各带噪点 —— 传感器噪点就长这样，不是整片斜坡
+    d = np.empty((240, 360, 3))
+    d[:80], d[80:160], d[160:] = 0.20, 0.45, 0.82
+    d = np.clip(d + rng.normal(0, 0.025, d.shape), 0.0, 1.0)
+
+    off, i0 = denoise.apply(d, C)
+    check('默认关 = 恒等', float(np.max(np.abs(off - d))) < 1e-12 and not i0['applied'])
+
+    cfg = _Cfg(DENOISE_ENABLE=True)
+    on, i1 = denoise.apply(d, cfg)
+    check('开启后真的动手', bool(i1['applied']) and i1['mask_mean'] > 0.0,
+          'mask 均值 %.3f' % i1['mask_mean'])
+    check('输出有界/无 NaN', bool(np.all(np.isfinite(on))) and on.min() >= 0 and on.max() <= 1)
+
+    g0, g1 = color.gray_of(d), color.gray_of(on)
+    check('全图均值漂移 < 0.002（零均值）', abs(float(g1.mean() - g0.mean())) < 0.002,
+          '%.5f -> %.5f' % (g0.mean(), g1.mean()))
+    for q in (C.PCT_MID, C.PCT_WHITE):
+        a, b = float(np.percentile(g0, q)), float(np.percentile(g1, q))
+        check('分位 %g 漂移 < 0.005' % q, abs(b - a) < 0.005, '%.4f -> %.4f' % (a, b))
+
+    n0, n1 = _hp_std(d[:80]), _hp_std(on[:80])
+    check('暗块噪点真的下降', n1 < n0 * 0.70, '%.2f -> %.2f' % (n0, n1))
+    h0, h1 = _hp_std(d[160:]), _hp_std(on[160:])
+    check('亮块基本不动（高光不给降）', h1 > h0 * 0.90, '%.2f -> %.2f' % (h0, h1))
+
+    # 硬边保留：黑白各半的台阶不能被打平
+    e = np.full((120, 120, 3), 0.22)
+    e[60:] = 0.78
+    e = np.clip(e + rng.normal(0, 0.02, e.shape), 0.0, 1.0)
+    eo, _ = denoise.apply(e, cfg)
+    f0, f1 = color.gray_of(e), color.gray_of(eo)
+    step0 = float(f1[64:76].mean() - f1[44:56].mean())
+    step1 = float(f0[64:76].mean() - f0[44:56].mean())
+    check('硬边台阶保留 ≥85%', step0 >= 0.85 * step1, '%.4f -> %.4f' % (step1, step0))
+
+    # 无噪点的暗部：黑位**不**该被抬（这一步才是"别平白提黑"的真正检验）
+    z = np.empty((240, 360, 3))
+    z[:120], z[120:] = 0.055, 0.72
+    zo, _ = denoise.apply(z, cfg)
+    b0 = float(np.percentile(color.gray_of(z), C.PCT_BLACK))
+    b1 = float(np.percentile(color.gray_of(zo), C.PCT_BLACK))
+    check('无噪点暗部的黑位不漂 < 0.005', abs(b1 - b0) < 0.005, '%.4f -> %.4f' % (b0, b1))
 
 
 def t_guard():
@@ -224,6 +333,7 @@ def t_pipeline_smoke():
     rep = analyze.analyze(_lin_from_disp(d), d, 'jpg')
     lin, ti = tone.correct(_lin_from_disp(d), rep, C)
     d1 = np.clip(color.l2s(lin), 0, 1)
+    d1, di = denoise.apply(d1, C)
     d2, si = style.apply(d1, C, lock_ref=style.mid_of(d1), stock=stocks.get('portra400'))
     d2b, pi = spatial.apply(d2, C, stock=stocks.get('portra400'))
     d3, li = local.apply(d1, d2b, C)
@@ -236,8 +346,9 @@ def t_pipeline_smoke():
 
 def main():
     for fn in (t_color, t_analyze, t_tone_mid_target, t_tone_monotone, t_style_lock,
-               t_guard, t_lut, t_io_roundtrip, t_stocks, t_spatial_off,
-               t_spatial_grain, t_spatial_bloom_halation, t_pipeline_smoke):
+               t_style_contrast_direction, t_denoise, t_guard, t_lut, t_io_roundtrip,
+               t_stocks, t_spatial_off, t_spatial_grain, t_spatial_bloom_halation,
+               t_pipeline_smoke):
         fn()
     print('-' * 52)
     if FAIL:
