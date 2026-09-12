@@ -52,10 +52,13 @@ _ID = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
 #   chroma_p/s  彩度 gamma 与倍率      ← 尺子：彩度中位 + 彩度P90（形状 + 量级）
 #   contrast    明度对比（只动 L*）    ← 尺子：反差 span90
 def _c(a=0.0, b=0.0, b_sh=0.0, b_hi=0.0, chroma_p=1.0, chroma_s=1.0, chroma_ref=20.0,
-       contrast=1.0, tint_lo=25.0, tint_hi=90.0, matrix=None):
+       contrast=1.0, tint_lo=25.0, tint_hi=90.0, matrix=None, chroma_ends=None):
+    """`chroma_ends` = 抽色饱和（两端掉彩量）。None = 继承 config.CHROMA_ENDS；
+    显式给 0.0 = 关（`neutral` 靠它保持恒等）。"""
     return dict(matrix=(matrix or _ID), a=a, b=b, b_sh=b_sh, b_hi=b_hi,
                 chroma_p=chroma_p, chroma_s=chroma_s, chroma_ref=chroma_ref,
-                contrast=contrast, tint_lo=tint_lo, tint_hi=tint_hi)
+                contrast=contrast, tint_lo=tint_lo, tint_hi=tint_hi,
+                chroma_ends=chroma_ends)
 
 
 def _s(grain=None, bloom=None, halation=None):
@@ -72,7 +75,8 @@ def _s(grain=None, bloom=None, halation=None):
 TABLE = {
     'neutral': dict(
         name='neutral', label=_LABEL['neutral'][0], desc=_LABEL['neutral'][1],
-        color=_c(), spatial=_s(),
+        color=_c(chroma_ends=0.0),   # 恒等：抽色饱和也关掉，保 A/B 对照底干净
+        spatial=_s(),
         source=None, calibrated=True,   # 恒等 = 无需标定
     ),
 
@@ -260,12 +264,15 @@ def color_params(cfg, stock, base=None):
              chroma_s=cfg.CHROMA_S * b['b_chroma_s'],
              chroma_ref=cfg.CHROMA_REF,
              contrast=cfg.CONTRAST * b['b_contrast'],
+             chroma_ends=float(getattr(cfg, 'CHROMA_ENDS', 0.0) or 0.0),
              fog=b['b_fog'])
     if stock:
         c = stock.get('color') or {}
         for k in ('matrix', 'tint_lo', 'tint_hi', 'chroma_ref'):
             if k in c:
                 p[k] = c[k]
+        if c.get('chroma_ends') is not None:            # 抽色饱和：卷可显式覆盖（0 = 关）
+            p['chroma_ends'] = float(c['chroma_ends'])
         for k in ('a', 'b', 'b_sh', 'b_hi'):
             if k in c:
                 p[k] = p[k] + c[k]                     # 偏移相加

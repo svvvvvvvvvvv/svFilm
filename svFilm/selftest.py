@@ -35,6 +35,9 @@ class _Cfg:
     def __init__(self, **kw):
         self._d = {k: getattr(C, k) for k in dir(C) if k.isupper()}
         self._d['BASE'] = 'BASE_NONE'
+        # 抽色饱和（CHROMA_ENDS）也是"出厂模型默认"，同样要隔离：
+        # 否则 "contrast=1.0 时完全不动" 会因为多跑一次 Lab 往返而红。
+        self._d['CHROMA_ENDS'] = 0.0
         self._d.update(kw)
 
     def __getattr__(self, k):
@@ -96,18 +99,29 @@ def _lin_from_disp(d):
 
 
 def t_tone_mid_target():
-    print('[L1 mid 靶]')
-    # gamma 0.45 => 中灰落在显示域 0.5 附近，构造"偏亮"的输入
+    print('[L1 过亮护栏：折中档（09-13）]')
+    # ① 只是"偏亮"的正常片（中位 ~0.73）=> 不该动手。
+    #    旧行为（护栏线 = TGT_MID 灰阶 140）会把它一路拽到 140 —— 那正是园岭被压闷的病。
     d = _gray_img(gamma=0.45)
     rep = analyze.analyze(_lin_from_disp(d), d, 'jpg')
-    lin, info = tone.correct(_lin_from_disp(d), rep, C)
+    gm0 = float(np.percentile(color.gray_of(d), C.PCT_MID))
+    check('只是偏亮的正常片 -> hold（不再拽到中灰）',
+          rep['decision'] == 'hold', '中位 %.3f / %s' % (gm0, rep['decision']))
+
+    # ② 真的亮得离谱（中位 > 护栏线 0.854）=> 压回来，落点 = 护栏线本身。
+    d2 = _gray_img(gamma=0.15)
+    rep2 = analyze.analyze(_lin_from_disp(d2), d2, 'jpg')
+    gm2 = float(np.percentile(color.gray_of(d2), C.PCT_MID))
+    check('真的亮得离谱 -> compress', rep2['decision'] == 'compress', '中位 %.3f' % gm2)
+    lin, info = tone.correct(_lin_from_disp(d2), rep2, C)
     out = np.clip(color.l2s(lin), 0, 1)
     gm = float(np.percentile(color.gray_of(out), C.PCT_MID))
-    check('敢动手', info['applied'], 'decision=%s' % rep['decision'])
+    check('敢动手', info['applied'], 'decision=%s' % rep2['decision'])
     if info['applied']:
-        check('中灰落到靶 ±0.01', abs(gm - C.TGT_MID) < 0.01, '%.4f vs %.4f' % (gm, C.TGT_MID))
+        check('中灰落到护栏线（不是拽到 0.55）', abs(gm - C.GUARD_MID) < 0.02,
+              '%.4f vs 护栏 %.4f（TGT_MID %.4f）' % (gm, C.GUARD_MID, C.TGT_MID))
         gw = float(np.percentile(color.gray_of(out), C.PCT_WHITE))
-        check('白点落到靶 ±0.01', abs(gw - C.TGT_WHITE) < 0.012, '%.4f vs %.4f' % (gw, C.TGT_WHITE))
+        check('白点落到靶 ±0.02', abs(gw - C.TGT_WHITE) < 0.02, '%.4f vs %.4f' % (gw, C.TGT_WHITE))
     check('无 NaN/Inf', np.all(np.isfinite(lin)))
     check('取值在 0~1', lin.min() >= -1e-9 and lin.max() <= 1.0 + 1e-9)
 
@@ -270,6 +284,26 @@ def t_io_roundtrip():
     os.remove(tmp)
 
 
+def t_style_chroma_ends():
+    """抽色饱和：两端掉彩、中间调不动（09-13 调研修正，出处 Emulsifier）。"""
+    print('[L2 抽色饱和（两端掉彩）]')
+    Ls = np.array([8.0, 25.0, 50.0, 75.0, 95.0])
+    lab = np.stack([Ls, np.full_like(Ls, 12.0), np.full_like(Ls, 12.0)], axis=-1)
+    # 先夹进显示域（L*=95 那块的 R 会超过 1），否则"关掉 = 恒等"测的是裁剪不是模型
+    d = np.clip(color.from_lab(lab), 0.0, 1.0).reshape(1, -1, 3)
+    out, _ = style.apply(d, _Cfg(CHROMA_ENDS=0.30), lock_ref=None)
+    c0 = color.chroma(color.to_lab(d))[0]
+    c1 = color.chroma(color.to_lab(out))[0]
+    check('抽色饱和：中间调（L*=50）不动', abs(c1[2] / c0[2] - 1.0) < 0.03,
+          '%.3f -> %.3f' % (c0[2], c1[2]))
+    check('抽色饱和：暗端掉彩', c1[0] / c0[0] < 0.85, '%.3f -> %.3f' % (c0[0], c1[0]))
+    check('抽色饱和：亮端掉彩', c1[4] / c0[4] < 0.85, '%.3f -> %.3f' % (c0[4], c1[4]))
+    out0, _ = style.apply(d, _Cfg(CHROMA_ENDS=0.0), lock_ref=None)
+    check('抽色饱和关掉 = 恒等', float(np.max(np.abs(out0 - d))) < 1e-9)
+    # 出厂默认必须开着（否则这个修正等于没做）
+    check('出厂默认抽色饱和开着', float(getattr(C, 'CHROMA_ENDS', 0.0)) > 0.0, str(getattr(C, 'CHROMA_ENDS', None)))
+
+
 def t_stocks():
     print('[卷 stocks]')
     for n in stocks.names():
@@ -319,6 +353,11 @@ def t_spatial_grain():
     blk = np.zeros((48, 48, 3))
     gb, _ = spatial.grain(blk, p)
     check('颗粒不把纯黑提亮（乘性叠加）', float(gb.max()) < 1e-12)
+    # ★ 高光端精确归零（09-13 调研修 bug）：白墙/天空不能有颗粒
+    wht = np.full((48, 48, 3), 0.99)
+    gw, _ = spatial.grain(wht, p)
+    check('颗粒在高光端归零（白墙/天空不动）', float(np.max(np.abs(gw - wht))) < 1e-12,
+          'max %.2e' % float(np.max(np.abs(gw - wht))))
     check('颗粒输出有界', bool(np.all(np.isfinite(g1))) and g1.min() >= 0 and g1.max() <= 1)
 
 
@@ -339,6 +378,17 @@ def t_spatial_bloom_halation():
     r, gg, bb = (float(ring[..., i].mean()) for i in range(3))
     check('Halation 晕圈偏红橙（R>G>B）', r > gg > bb, '%.4f/%.4f/%.4f' % (r, gg, bb))
     check('Halation 输出有界', bool(np.all(np.isfinite(h))) and h.min() >= 0 and h.max() <= 1)
+
+    # ★ 分通道半径（09-13 调研修正）：红光散得最远、绿居中、蓝近零
+    _, hi = spatial.halation(d, p['halation'])
+    ratios = hi.get('radius_ratios')
+    check('Halation 分通道半径（R>G>B）',
+          bool(ratios) and float(ratios[0]) > float(ratios[1]) > float(ratios[2]), str(ratios))
+    # 远处外圈：红还有能量，绿已经基本没有（蓝半径最小）
+    far = h[26:52, 80:120]
+    fr, fg, fb = (float(far[..., i].mean()) for i in range(3))
+    check('Halation 外圈以红为主（R 明显 > G）', fr > fg * 1.5,
+          '外圈 R/G/B %.5f/%.5f/%.5f' % (fr, fg, fb))
 
 
 def t_pipeline_smoke():
@@ -492,9 +542,9 @@ def t_entry_bias():
 
 def main():
     for fn in (t_color, t_analyze, t_tone_mid_target, t_tone_monotone, t_style_lock,
-               t_style_contrast_direction, t_denoise, t_guard, t_lut, t_io_roundtrip,
-               t_stocks, t_spatial_off, t_spatial_grain, t_spatial_bloom_halation,
-               t_entry_bias, t_pipeline_smoke):
+               t_style_contrast_direction, t_style_chroma_ends, t_denoise, t_guard, t_lut,
+               t_io_roundtrip, t_stocks, t_spatial_off, t_spatial_grain,
+               t_spatial_bloom_halation, t_entry_bias, t_pipeline_smoke):
         fn()
     print('-' * 52)
     if FAIL:

@@ -111,6 +111,8 @@ def _builtin(disp, cfg, stock=None, base=None):
 
     has_tint = (abs(p['a']) + abs(p['b']) + abs(p['b_sh']) + abs(p['b_hi'])) > 1e-6
     has_chroma = abs(p['chroma_p'] - 1.0) > 1e-6 or abs(p['chroma_s'] - 1.0) > 1e-6
+    _ce = float(p.get('chroma_ends', 0.0) or 0.0)      # 抽色饱和（两端掉彩）
+    has_chroma = has_chroma or _ce > 0.0
     has_contrast = abs(p['contrast'] - 1.0) > 1e-6
     if not (has_tint or has_chroma or has_contrast):
         return np.clip(out, 0.0, 1.0)
@@ -130,6 +132,13 @@ def _builtin(disp, cfg, stock=None, base=None):
         Cr = float(p['chroma_ref'])
         Cn = p['chroma_s'] * Cr * np.power(np.maximum(C, 1e-6) / Cr, p['chroma_p'])
         k = np.where(C > 1e-6, Cn / np.maximum(C, 1e-6), 1.0)
+        # ★ 抽色饱和（09-13 调研修正）：两端掉彩，中间调（L*=50）不动。
+        #   公式出处 Emulsifier（`_debug/_rs/emul/engine.py`）：sat_mult = 1 - subsat*(2*luma-1)^2。
+        #   和 L1 的 HILIGHT_DESAT 分工：那边管高光端，这里补上**暗部端**
+        #   （09-13 园岭暗部泛紫红斑就是这一块）。
+        if _ce > 0.0:
+            Ln = np.clip(L, 0.0, 100.0) / 100.0
+            k = k * (1.0 - _ce * (2.0 * Ln - 1.0) ** 2)
         lab[..., 1] = a2 * k
         lab[..., 2] = b2 * k
 

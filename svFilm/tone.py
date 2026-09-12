@@ -50,7 +50,14 @@ def build_curve(rep, cfg=C, allow_lift=False):
 
     # ---- 绝对靶：显示域 -> lin 域 ----
     Tb = float(color.s2l(cfg.TGT_BLACK))
-    Tm = float(color.s2l(cfg.TGT_MID))
+    # 中灰落点分两种（09-13「折中」档）：
+    #   compress（真的亮得离谱）-> 落到**过亮护栏线** GUARD_MID：只把"离谱的那一截"收回来，
+    #                             不再拽到中灰 TGT_MID（那会把正常的亮片压闷）。
+    #   其余（below 的兜底提亮）-> 落到 TGT_MID（大师中位的那个灰）。
+    if rep.get('decision') == 'compress':
+        Tm = float(color.s2l(getattr(cfg, 'GUARD_MID', cfg.TGT_MID)))
+    else:
+        Tm = float(color.s2l(cfg.TGT_MID))
     Tw = float(color.s2l(cfg.TGT_WHITE))
 
     # ---- 输入位置（log2） ----

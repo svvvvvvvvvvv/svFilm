@@ -36,7 +36,8 @@ def resolve(cfg=C, stock=None):
                    warmth=cfg.BLOOM_WARMTH, veil=cfg.BLOOM_VEIL),
         halation=dict(enable=cfg.HALATION_ENABLE, amount=cfg.HALATION_AMOUNT,
                       radius=cfg.HALATION_RADIUS, thr_lo=cfg.HALATION_THR_LO,
-                      thr_hi=cfg.HALATION_THR_HI, color=list(cfg.HALATION_COLOR)),
+                      thr_hi=cfg.HALATION_THR_HI, color=list(cfg.HALATION_COLOR),
+                      radius_ratios=list(cfg.HALATION_RADIUS_RATIOS)),
     )
     if stock:
         sp = stock.get('spatial') or {}
@@ -104,7 +105,10 @@ def grain(disp, p, cfg=C):
     # 亮度包络：中间调最明显，两端收（胶片就是这样，不是均匀撒盐）
     env = np.clip(4.0 * g * (1.0 - g), 0.0, 1.0) ** 0.55
     env *= color.smoothstep(g, float(p.get('dark_floor', 0.03)), float(p.get('dark_floor', 0.03)) + 0.07)
-    env *= 1.0 - 0.70 * color.smoothstep(g, 0.90, 1.0)
+    # ★ 高光端**精确归零**（09-13 调研修 bug）：原来只压 0.70，白墙/天空还留 30% 颗粒在动。
+    #   物理：密度饱和区没有可显影的银盐。外面（LIMO `applyGrainAsExposure`、
+    #   Emulsifier `grain_mask=(luma^0.5)(1-luma)^1.5`）两端都精确为 0。
+    env *= 1.0 - color.smoothstep(g, float(cfg.GRAIN_HI_LO), float(cfg.GRAIN_HI_HI))
 
     # 区域抑制：脸和高细节处少撒
     if p.get('skin_suppress', 0.0) > 0.0:
@@ -176,14 +180,21 @@ def halation(disp, p, cfg=C):
     # 亮部才有能量；晕圈出现在亮区的**外侧**（片基把光散回去）
     bright = color.smoothstep(g, float(p.get('thr_lo', 0.78)), float(p.get('thr_hi', 0.99)))
     src = bright[..., None] * lin
-    spread = np.stack([_blur(src[..., i], float(p.get('radius', 18.0))) for i in range(3)], axis=-1)
+
+    # ★ 分通道扩散半径（09-13 调研修正）：红光穿透片基散射得最远，蓝光几乎不散。
+    #   出处：LIMO `FilmShaderCommon.h` RED/GREEN/BLUE_PENETRATION = 0.88/0.10/0.02；
+    #         spektrafilm 也是三通道各自独立的散射 sigma。
+    #   ⇒ 红边变成"外圈红、里层偏白"，而不是把亮部整块叠一层橙。
+    r0 = float(p.get('radius', 18.0))
+    ratios = p.get('radius_ratios') or [1.0, 0.45, 0.15]
+    spread = np.stack([_blur(src[..., i], r0 * float(ratios[i])) for i in range(3)], axis=-1)
     ring = spread * (1.0 - np.clip(bright * 1.25, 0.0, 1.0))[..., None]
 
     col = np.asarray(p.get('color', [1.0, 0.30, 0.12]), np.float64)
     out_lin = lin + float(p['amount']) * ring * col
     out = np.clip(color.l2s(out_lin), 0.0, 1.0)
-    return out, dict(applied=True, amount=float(p['amount']),
-                     radius=float(p.get('radius', 18.0)))
+    return out, dict(applied=True, amount=float(p['amount']), radius=r0,
+                     radius_ratios=[float(x) for x in ratios])
 
 
 # ---------------- 编排 ----------------

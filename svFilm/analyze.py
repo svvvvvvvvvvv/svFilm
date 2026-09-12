@@ -35,12 +35,14 @@ def analyze(lin, disp, kind='raw'):
     # 有效曝光偏差（相对上限护栏），**只用来做报告**，不用来决定"要不要提亮"
     ev_est = float(np.log2(max(gm, C.NOISE_FLOOR) / C.TGT_MID))
 
-    # 决策：中灰只当**上限护栏**（"亮得过分就压回来"），不再当提亮靶。
-    # ⚠ 09-13 起 TGT_MID 不再是"中灰靶"：中位数是内容量（画面里暗的东西占多少），
-    #   不是曝光量。拿它提亮会把每张图都拽到同一个中间灰（园岭实测：相机 66/104/173/177/236
-    #   的片子被拉成 89/121/132/133/137）。欠曝该在入口按 baseline exposure 补（见 io.load_raw）。
-    if gm > C.TGT_MID + C.MID_DEADZONE:
-        decision = 'compress'          # 亮得过分 -> 压回来（这就是"救过曝"）
+    # 决策：中灰只当**过亮护栏**（"亮得离谱就压回来"），不当提亮靶。
+    # ⚠ 09-13 起护栏线 = **GUARD_MID**（大师逐图『中位 L*』的 P95 = 87.0 → 显示域 0.854），
+    #   不再是 TGT_MID（灰阶 140）。原因：中位数是**内容量**（画面里暗的东西占多少），
+    #   不是曝光量 —— 大师全体有**一半**的片子中位在 L*58 以上，拿 140 当线等于把正常亮片压闷
+    #   （园岭实测：入口已经把中位送到贴住相机 161，L1 又把它拽回 138）。
+    #   欠曝该在入口按 baseline exposure 补（见 io.load_raw）。
+    if gm > C.GUARD_MID:
+        decision = 'compress'          # 真的亮得离谱 -> 压回来（这就是"救过曝"）
     elif gm < C.TGT_MID - C.MID_DEADZONE:
         decision = 'below'             # 偏暗：入口补过就不动；入口补不了才允许兜底提亮
     else:
