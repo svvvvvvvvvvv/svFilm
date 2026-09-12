@@ -14,7 +14,7 @@ import time
 
 import numpy as np
 
-from . import analyze, color, config as C, guard, io, local, spatial, stocks, style, tone
+from . import analyze, color, config as C, denoise, guard, io, local, spatial, stocks, style, tone
 
 
 class Result:
@@ -42,9 +42,11 @@ class Result:
             tag.append('黑柔')
         if sp.get('halation', {}).get('applied'):
             tag.append('Halation')
-        return ('{}  [{}]  {}  |  {}  |  修正{}  |  空间{}  |  护栏{}  |  {:.0f}ms'.format(
-            self.sample.name, self.sample.kind, analyze.summarize(a),
+        btag = r.get('base_label') or '无'
+        return ('{}  [{}]  {}  |  基准{}  |  {}  |  降噪{}  |  修正{}  |  空间{}  |  护栏{}  |  {:.0f}ms'.format(
+            self.sample.name, self.sample.kind, analyze.summarize(a), btag,
             stocks.label_of((r.get('style') or {}).get('stock')),
+            ('开' if (r.get('denoise') or {}).get('applied') else '关'),
             ('ev%+.2f' % r['tone']['ev_mid']) if r['tone']['applied'] else '未触发',
             ('+'.join(tag) if tag else '无'),
             ('/'.join(r['guard']['actions']) if r['guard']['actions'] else '无'),
@@ -60,7 +62,8 @@ def _stock_of(stock, cfg):
     return stock
 
 
-def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=False, stock=None):
+def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=False,
+        stock=None, base=None):
     t0 = time.perf_counter()
     st = _stock_of(stock, cfg)
     s = io.load(path, max_side or cfg.MAX_SIDE, src=src)
@@ -68,11 +71,13 @@ def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=Fa
     rep0 = analyze.analyze(s.lin, s.disp, s.kind)                    # L0
     lin1, t_info = tone.correct(s.lin, rep0, cfg)                    # L1
     disp1 = np.clip(color.l2s(np.clip(lin1, 0.0, 1.0)), 0.0, 1.0)
+    disp1, d_info = denoise.apply(disp1, cfg)                        # 降噪（L1 之后、L2 之前）
 
     if lut is None and cfg.LUT_PATH:
         lut = style.cube_read(cfg.LUT_PATH)
     # 锁中灰的参照 = 修正层实际交出来的中灰（不是配置里的靶）
-    disp2, s_info = style.apply(disp1, cfg, lut=lut, lock_ref=style.mid_of(disp1), stock=st)
+    disp2, s_info = style.apply(disp1, cfg, lut=lut, lock_ref=style.mid_of(disp1),
+                                stock=st, base=base)
     disp2b, sp_info = spatial.apply(disp2, cfg, stock=st)            # 空间域（颗粒/黑柔/Halation）
     disp3, l_info = local.apply(disp1, disp2b, cfg)                  # L3
     disp4, g_info = guard.enforce(disp3, cfg)                        # L4
@@ -81,8 +86,11 @@ def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=Fa
         camera=s.cam,
         stock=(st or {}).get('name'),
         stock_label=stocks.label_of((st or {}).get('name')),
+        base=stocks.resolve_base(cfg, base)['name'],
+        base_label=stocks.base_label(cfg, base),
         analyze=rep0,
         tone=t_info,
+        denoise=d_info,
         style=s_info,
         spatial=sp_info,
         local=l_info,
@@ -92,7 +100,7 @@ def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=Fa
     if keep_stages:
         rep['stages'] = dict(
             base=s.disp,            # 入口归一后的样子（RAW 就是线性直出）
-            after_tone=disp1,       # 只做完 L1 影调修正
+            after_tone=disp1,       # 做完 L1 影调修正 + 降噪
             after_style=disp2,      # 再过 L2 风格
             after_spatial=disp2b,   # 再过空间域
             after_local=disp3,

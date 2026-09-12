@@ -2,10 +2,10 @@
 """度量层 —— 和"大师作品再学习"那把尺子**完全同口径**的指纹。
 
 为什么单独一个模块：卷的数值要"从数据里量出来"，那就必须有一把**两边都能量**的尺子。
-`_debug/analysis/master_resurvey.json` 是用这把尺子量大师的 1172 张（1024 长边、Lab D65）；
+`../_debug/analysis/master_resurvey.json` 是用这把尺子量大师的 1172 张（1024 长边、Lab D65）；
 这里复刻同一套定义，用来量**我们自己的成片**，两边一比才知道差在哪、要补多少。
 
-定义（照抄 `_debug/lab_master_resurvey.py`，改任何一个都要重跑标定）：
+定义（照抄 `../_debug/lab_master_resurvey.py`，改任何一个都要重跑标定）：
   L{q}    Lab L* 的分位
   c50/c90 Lab 彩度 C 的中位 / P90
   a_med/b_med  Lab a*/b* 中位

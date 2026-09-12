@@ -17,9 +17,9 @@ r"""胶片卷表 —— 一个"卷"就是一份数据：颜色性格 + 空间效
 **出处（v0.2.1 起：颜色数值是从数据量出来的，不是手编的）**
 
 * **卷名 / 方向** 继承 `E:\WorkBuddy\摄影助手\大师作品\胶片卷映射与分组策略.md`
-  （09-10，SV 授权命名；见 `_debug/master_doc_0912.md` §五"大师九条线"）。
-* **颜色数值** = 由 `_debug/calib_stocks_from_masters.py` 从 **1170 张大师成片**
-  （`_debug/analysis/master_resurvey.json`）量出来的，口径「取神不取形」：
+  （09-10，SV 授权命名；见 `../_debug/master_doc_0912.md` §五"大师九条线"）。
+* **颜色数值** = 由 `../_debug/calib_stocks_from_masters.py` 从 **1170 张大师成片**
+  （`../_debug/analysis/master_resurvey.json`）量出来的，口径「取神不取形」：
   **卷 = 这条作者线相对"大师全体中位"的性格偏移**。
   逐卷证据见 `效果debug/<日期>/卷标定_大师颜色聚类/卷标定报告.md`。
 * **空间数值** = 手写底子 × 数据相对微调（噪声混了 ISO/降噪/压缩，只能当相对信号）。
@@ -183,23 +183,92 @@ def label_of(name):
     return TABLE[str(name).strip().lower()]['label']
 
 
-def color_params(cfg, stock):
-    """把卷的颜色参数叠到 config 默认上（卷优先）；stock=None 时就是 config 默认。
+# ---------------- 基准成色（不属于任何卷） ----------------
+def base_names():
+    return list(C_BASE_NAMES)
 
-    字段和"大师那把尺子"一一对应：
+
+def resolve_base(cfg, base=None):
+    """基准成色的解析 + 归一成 L2 能吃的字段。
+
+    base 可以是预设名（见 config.BASE_TABLE）或 dict；None 时取 config.BASE。
+    键用 b_ 前缀，避免和卷的字段名混淆。
+    """
+    name = base if base is not None else getattr(cfg, 'BASE', None)
+    tb = getattr(cfg, 'BASE_TABLE', {}) or {}
+    if isinstance(name, dict):
+        d = name
+        name = d.get('name') or 'custom'
+    else:
+        key = str(name or 'BASE_NONE').strip().upper()
+        if key not in tb:
+            key = 'BASE_NONE'
+        d = tb.get(key, {})
+        name = key
+    return dict(name=name,
+                label=d.get('label') or name,
+                desc=d.get('desc') or '',
+                b_a=float(d.get('a', 0.0) or 0.0),
+                b_b=float(d.get('b', 0.0) or 0.0),
+                b_b_sh=float(d.get('b_sh', 0.0) or 0.0),
+                b_b_hi=float(d.get('b_hi', 0.0) or 0.0),
+                b_chroma_p=float(d.get('chroma_p', 1.0) or 1.0),
+                b_chroma_s=float(d.get('chroma_s', 1.0) or 1.0),
+                b_contrast=float(d.get('contrast', 1.0) or 1.0),
+                b_fog=float(d.get('fog', 0.0) or 0.0))
+
+
+def base_label(cfg, base=None):
+    """基准成色的中文名，汇报用。None/未指定 → 取 config.BASE；都是恒等 → 汇报成"无"。"""
+    r = resolve_base(cfg, base)
+    if abs(r['b_b']) + abs(r['b_a']) + abs(r['b_fog']) < 1e-9 and \
+            abs(r['b_chroma_p'] - 1.0) < 1e-9 and abs(r['b_chroma_s'] - 1.0) < 1e-9 and \
+            abs(r['b_contrast'] - 1.0) < 1e-9:
+        return '无'
+    return r['label']
+
+
+C_BASE_NAMES = ['BASE_NONE', 'BASE_FOG', 'BASE_DEYELLOW', 'BASE_FULL']
+
+
+def color_params(cfg, stock, base=None):
+    """把「基准成色」再叠「卷」的颜色参数，得出 L2 最终要用的那一组数。
+
+    顺序（路 B 定的口径，别混）：
+      cfg 默认  →  基准成色（中性路径对齐大师平均）  →  卷（相对大师平均的性格偏移）
+
+    叠加规则：
+      * 偏移类（a / b / b_sh / b_hi）：**相加**。卷量的是"相对大师平均的偏移"，
+        基准负责把我们的中性路径挪到"大师平均"上，两者相加才落在作者线上。
+      * 彩度类（chroma_p / chroma_s）与对比（contrast）：**相乘**。
+      * fog（雾）只有基准有，卷不用管。
+
+    字段 ↔ 尺子对应：
       a / b       整体 a*/b* 偏移      ←→ 尺子的 a*中位 / b*中位
       b_sh / b_hi 暗部/亮部额外 b*     ←→ 尺子的 暗部b* / 亮部b*（冷暖分离）
       chroma_p/s  彩度 gamma 与倍率    ←→ 尺子的 彩度中位 / 彩度P90
       contrast    明度对比             ←→ 尺子的 反差 span90
+      fog         线性光域黑位抬升      ←→ 尺子的 黑位 / 雾量
     """
+    b = resolve_base(cfg, base)
     p = dict(matrix=cfg.FILM_MATRIX,
-             a=cfg.COL_A, b=cfg.COL_B, b_sh=cfg.COL_B_SH, b_hi=cfg.COL_B_HI,
+             a=cfg.COL_A + b['b_a'], b=cfg.COL_B + b['b_b'],
+             b_sh=cfg.COL_B_SH + b['b_b_sh'], b_hi=cfg.COL_B_HI + b['b_b_hi'],
              tint_lo=cfg.COL_TINT_LO, tint_hi=cfg.COL_TINT_HI,
-             chroma_p=cfg.CHROMA_P, chroma_s=cfg.CHROMA_S, chroma_ref=cfg.CHROMA_REF,
-             contrast=cfg.CONTRAST)
+             chroma_p=cfg.CHROMA_P * b['b_chroma_p'],
+             chroma_s=cfg.CHROMA_S * b['b_chroma_s'],
+             chroma_ref=cfg.CHROMA_REF,
+             contrast=cfg.CONTRAST * b['b_contrast'],
+             fog=b['b_fog'])
     if stock:
         c = stock.get('color') or {}
-        for k in p:
+        for k in ('matrix', 'tint_lo', 'tint_hi', 'chroma_ref'):
             if k in c:
                 p[k] = c[k]
+        for k in ('a', 'b', 'b_sh', 'b_hi'):
+            if k in c:
+                p[k] = p[k] + c[k]                     # 偏移相加
+        for k in ('chroma_p', 'chroma_s', 'contrast'):
+            if k in c:
+                p[k] = p[k] * c[k]                     # 乘性相加
     return p

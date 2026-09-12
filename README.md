@@ -40,15 +40,19 @@
 ## 目录规范
 
 ```
-svFilm/                    工程（git 仓库）
+svFilm/                    工程（git 仓库，只放产品代码）
   svFilm/                  包：L0~L4 + 空间域 + 入口 + 路径 + 卷表
-  _debug/                  调试/出图脚本（不进生产链，产物全走 paths.py）
   <样片目录>/效果debug/<日期 YYYY-MM-DD>/<目的说明>/<文件>
+
+E:\WorkBuddy\摄影助手\
+  _debug/                  调试/出图脚本 + 分析数据（**在仓库外**：含隐私路径/网盘路径，不进 git）
 ```
 
 - 一级 `效果debug`：所有"给人看效果"的产物归到这里，不再散落在样片旁边。
 - 二级日期默认今天，三级是这批图**为了看什么**（例：`三张RAW_分段对照`）。
 - `cli dir` 扫描时**整棵跳过 `效果debug`**，避免把上一轮的产出当素材再处理一遍。
+- 调试脚本**不在工程里**：它们写着样片/大师作品的绝对路径和作者名，进仓库等于泄露。
+  在工程根执行时用 `../_debug/xxx.py`；脚本内部靠 `SVFILM_ROOT` 环境变量找工程根（默认 `../svFilm`）。
 
 ## 常用命令
 
@@ -58,18 +62,20 @@ GIT=C:/Users/psw99/.workbuddy/binaries/PortableGit/versions/1.2.0/cmd/git.exe  #
 
 $PY -m svFilm.selftest                                  # 动完任何一层都要跑
 $PY -m svFilm.cli stocks                                # 列出所有胶片卷（人话说明）
-$PY -m svFilm.cli probe <img...> --after [--stock 卷名]  # 只看数，不写文件
-$PY -m svFilm.cli one   <img> -o out.jpg --stock 卷名    # 单张
-$PY -m svFilm.cli dir   <in> -o <out> --jobs 4 --stock 卷名   # 批（重活 jobs<=4，输出名带 _svFilm_卷名）
-$PY -m svFilm.cli bake  x.cube --size 33 --stock 卷名 --purpose <目的> --root <样片目录>   # 把某卷烘成 .cube
+$PY -m svFilm.cli bases                                 # 列出基准成色候选（中性路径对齐大师平均）
+$PY -m svFilm.cli probe <img...> --after [--stock 卷名] [--base 基准名]  # 只看数，不写文件
+$PY -m svFilm.cli one   <img> -o out.jpg --stock 卷名 --base 基准名   # 单张
+$PY -m svFilm.cli dir   <in> -o <out> --jobs 4 --stock 卷名 --base 基准名   # 批（重活 jobs<=4）
+$PY -m svFilm.cli dir   <选片目录> -o <out> --pair <拍摄目录> --raw-only   # 选片只有 JPG 时：去拍摄目录取同名 RAW
+$PY -m svFilm.cli bake  x.cube --size 33 --stock 卷名 --base 基准名 --purpose <目的> --root <样片目录>
 $PY -m svFilm.cli calib <RAW+JPG 同名对...>              # 量机型表要填的 baseline_ev
 
-$PY _debug/make_sheet.py        --purpose <目的> <stem...>   # 分段：底/只修正/出片
-$PY _debug/make_stock_sheet.py  --purpose <目的> <stem...>   # 卷对照：一张图 x 各卷
-$PY _debug/make_spatial_sheet.py --purpose <目的> <stem...>  # 空间域：逐个开颗粒/黑柔/Halation（默认 1:1 切图）
-$PY _debug/make_crop.py         --purpose <目的> <stem...>   # 100% 细节切图
-$PY _debug/lab_ours_fingerprint.py --stocks neutral --tag 基线14 <14 张探针>  # 量我方指纹 / 验收落带
-$PY _debug/calib_stocks_from_masters.py --ours <基线.json>   # 从大师作品量出卷参数 → 抄回 stocks.py
+$PY ../_debug/make_sheet.py        --purpose <目的> <stem...>   # 分段：底/只修正/出片
+$PY ../_debug/make_stock_sheet.py  --purpose <目的> <stem...>   # 卷对照：一张图 x 各卷
+$PY ../_debug/make_spatial_sheet.py --purpose <目的> <stem...>  # 空间域：逐个开颗粒/黑柔/Halation（默认 1:1 切图）
+$PY ../_debug/make_crop.py         --purpose <目的> <stem...>   # 100% 细节切图
+$PY ../_debug/lab_ours_fingerprint.py --stocks neutral --bases BASE_NONE,BASE_FOG --tag 基线  # 量我方指纹 / 验收落带
+$PY ../_debug/calib_stocks_from_masters.py --ours <基线.json>   # 从大师作品量出卷参数 → 抄回 stocks.py
 ```
 
 ### 卷的标定链（路 B，改口径必须整条重跑）

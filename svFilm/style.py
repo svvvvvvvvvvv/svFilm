@@ -85,19 +85,25 @@ def cube_apply(disp, cube):
 
 
 # ---------------- 内置颜色模型 ----------------
-def _builtin(disp, cfg, stock=None):
+def _builtin(disp, cfg, stock=None, base=None):
     """按"量出来的数"给颜色。一次 Lab 往返做完，顺序：
 
+      ⓪ 线性域「雾」：黑位抬升（胶片黑不是死黑）—— 基准成色专属，卷不设
       ① 线性域 3x3（负片交调，默认恒等）
       ② 色偏：整体 a*/b* + 按亮度分裂的 b*（暗部/亮部分开，对齐大师那把尺子）
       ③ 彩度：C' = s·Cref·(C/Cref)^p —— 两个自由度正好对上"彩度中位"和"彩度P90"两个靶
       ④ 明度对比（只动 L*，a/b 不动 → 对比不脏色）
 
+    参数 = cfg 默认 → 基准成色（中性路径对齐大师平均）→ 卷（相对大师平均的性格偏移）。
     色偏在纯黑纯白两端淡出：纯黑不该有颜色，纯白也不该被染色（否则高光被染脏、还容易削顶）。
     """
-    p = stocks.color_params(cfg, stock)
+    p = stocks.color_params(cfg, stock, base)
 
     lin = color.s2l(disp)
+    fog = float(p.get('fog', 0.0) or 0.0)
+    if fog > 0.0:
+        # 线性光域抬黑：纯黑抬到 fog，白端不动（fog 很小，实测 0.0063 ≈ 黑位 L* 6.6）
+        lin = lin + fog * np.clip(1.0 - lin, 0.0, None)
     M = np.asarray(p['matrix'], np.float64)
     if not np.allclose(M, np.eye(3), atol=1e-9):
         lin = lin @ M.T
@@ -157,8 +163,8 @@ def lock_mid(disp, ref_mid, max_gain=1.25):
     return np.clip(out, 0.0, 1.0), float(np.log2(k))
 
 
-def apply(disp, cfg=C, lut=None, lock_ref=None, stock=None):
-    out = _builtin(disp, cfg, stock)
+def apply(disp, cfg=C, lut=None, lock_ref=None, stock=None, base=None):
+    out = _builtin(disp, cfg, stock, base)
 
     if lut is not None:
         c = cube_apply(np.clip(out, 0.0, 1.0), lut)
@@ -166,7 +172,8 @@ def apply(disp, cfg=C, lut=None, lock_ref=None, stock=None):
         out = np.clip(out * (1.0 - s) + c * s, 0.0, 1.0)
 
     info = dict(lut=bool(lut is not None), lock_ev=0.0,
-                stock=(stock or {}).get('name'))
+                stock=(stock or {}).get('name'),
+                base=stocks.resolve_base(cfg, base)['name'])
     if cfg.LOCK_MID and lock_ref is not None:
         out, ev = lock_mid(out, lock_ref)
         info['lock_ev'] = ev
@@ -181,18 +188,21 @@ def bake_grid(size=33):
     return np.stack([R, G, B], axis=-1).reshape(-1, 3)
 
 
-def bake_cube(path, size=33, cfg=C, chunk=4096, stock=None):
+def bake_cube(path, size=33, cfg=C, chunk=4096, stock=None, base=None):
     """把 L2 层离线烘成 .cube（不含 LOCK_MID，那是逐图的）。
 
     给了 stock 就烘那一卷的颜色性格 —— 这样"卷"可以落成一个 .cube 文件，
-    别的软件（达芬奇/PS）也能直接用同一套颜色。
+    别的软件（达芬奇/PS）也能直接用同一套颜色。base 同理（基准成色也一起烘进去）。
     """
     grid = bake_grid(size)
     out = np.empty_like(grid)
     for i in range(0, grid.shape[0], chunk):
         blk = grid[i:i + chunk].reshape(1, -1, 3)
-        o, _ = apply(blk, cfg, lock_ref=None, stock=stock)   # 烘焙时不做锁中灰（那是逐图的）
+        o, _ = apply(blk, cfg, lock_ref=None, stock=stock, base=base)   # 烘焙时不做锁中灰（那是逐图的）
         out[i:i + chunk] = o.reshape(-1, 3)
     cube = out.reshape(size, size, size, 3)
-    title = 'svFilm L2 style / display domain' + (' / ' + stock['name'] if stock else '')
+    bn = stocks.base_label(cfg, base)
+    title = ('svFilm L2 style / display domain'
+             + (' / ' + stock['name'] if stock else '')
+             + ((' / ' + bn) if bn != '无' else ''))
     return cube_write(path, cube, title=title)
