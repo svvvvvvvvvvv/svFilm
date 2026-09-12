@@ -43,8 +43,14 @@ class Result:
         if sp.get('halation', {}).get('applied'):
             tag.append('Halation')
         btag = r.get('base_label') or '无'
-        return ('{}  [{}]  {}  |  基准{}  |  {}  |  降噪{}  |  修正{}  |  空间{}  |  护栏{}  |  {:.0f}ms'.format(
-            self.sample.name, self.sample.kind, analyze.summarize(a), btag,
+        b = r.get('entry_bias_ev')
+        if b is None:
+            etag = '入口无基线'
+        else:
+            dr = r.get('fuji_dr')
+            etag = '入口%+.2fEV%s' % (b, ('(DR%s)' % dr) if dr else '')
+        return ('{}  [{}]  {}  |  {}  |  基准{}  |  {}  |  降噪{}  |  修正{}  |  空间{}  |  护栏{}  |  {:.0f}ms'.format(
+            self.sample.name, self.sample.kind, analyze.summarize(a), etag, btag,
             stocks.label_of((r.get('style') or {}).get('stock')),
             ('开' if (r.get('denoise') or {}).get('applied') else '关'),
             ('ev%+.2f' % r['tone']['ev_mid']) if r['tone']['applied'] else '未触发',
@@ -62,6 +68,26 @@ def _stock_of(stock, cfg):
     return stock
 
 
+def _entry_bias(sample):
+    """入口实际补掉了几档基线曝光（io.load_raw 写在 cam 里）。JPG 路径没有这一项。"""
+    if sample.kind != 'raw':
+        return None
+    v = (sample.cam or {}).get('idt_bias_ev')
+    return None if v is None else float(v)
+
+
+def _allow_lift(sample, cfg):
+    """入口补过基线曝光 ⇒ 曝光层不再提亮；补不了（非富士/读不到 tag）才退回兜底。"""
+    if sample.kind != 'raw':
+        return bool(cfg.ALLOW_LIFT_JPG)
+    if not cfg.ALLOW_LIFT_RAW:
+        return False
+    b = _entry_bias(sample)
+    if cfg.AUTO_LIFT_ONLY_WHEN_NO_ENTRY_BIAS and b is not None and abs(b) > 1e-6:
+        return False
+    return True
+
+
 def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=False,
         stock=None, base=None):
     t0 = time.perf_counter()
@@ -69,7 +95,8 @@ def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=Fa
     s = io.load(path, max_side or cfg.MAX_SIDE, src=src)
 
     rep0 = analyze.analyze(s.lin, s.disp, s.kind)                    # L0
-    lin1, t_info = tone.correct(s.lin, rep0, cfg)                    # L1
+    allow = _allow_lift(s, cfg)
+    lin1, t_info = tone.correct(s.lin, rep0, cfg, allow_lift=allow)   # L1
     disp1 = np.clip(color.l2s(np.clip(lin1, 0.0, 1.0)), 0.0, 1.0)
     disp1, d_info = denoise.apply(disp1, cfg)                        # 降噪（L1 之后、L2 之前）
 
@@ -84,6 +111,9 @@ def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=Fa
 
     rep = dict(
         camera=s.cam,
+        entry_bias_ev=_entry_bias(s),
+        fuji_dr=(s.cam or {}).get('fuji_dr'),
+        allow_lift=allow,
         stock=(st or {}).get('name'),
         stock_label=stocks.label_of((st or {}).get('name')),
         base=stocks.resolve_base(cfg, base)['name'],

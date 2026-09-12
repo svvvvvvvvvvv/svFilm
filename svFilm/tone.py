@@ -123,16 +123,23 @@ def highlight_desat(lin_rgb, Y, cfg=C):
     return lin_rgb + (Y[..., None] - lin_rgb) * m[..., None]
 
 
-def correct(lin, rep, cfg=C):
+def correct(lin, rep, cfg=C, allow_lift=None):
     """lin 进 lin 出。返回 (lin_out, info)。
 
     动不动手，由"方向 + 源的提亮许可"两件事一起决定：
-      hold   -> 本来就在靶上，不动
-      below  -> 偏暗。RAW 允许提亮，JPG 不动（一放大就出伪色）
-      compress -> 偏亮，压回去
+      hold     -> 没超出上限护栏，不动
+      below    -> 偏暗。**入口补过基线曝光就不再提亮**（否则等于把补好的又拽回去）；
+                  只有入口补不了（非富士 / 读不到 tag）时才退回让这里兜底
+      compress -> 偏亮，压回来（这就是"救过曝"）
+
+    ⚠ 这里的中灰只当**上限护栏**，不是"提亮靶"。拿整图中位数当靶会把每张图都拽到
+      同一个中间灰（内容量冒充曝光量），09-13 园岭实测就是这个病。
     """
     dec = rep['decision']
-    allow = bool(cfg.ALLOW_LIFT_RAW if rep.get('kind') == 'raw' else cfg.ALLOW_LIFT_JPG)
+    if allow_lift is None:
+        allow = bool(cfg.ALLOW_LIFT_RAW if rep.get('kind') == 'raw' else cfg.ALLOW_LIFT_JPG)
+    else:
+        allow = bool(allow_lift)
 
     if dec == 'hold' or (dec == 'below' and not allow):
         return lin.copy(), dict(applied=False, reason=dec, ev_mid=0.0, capped=False,

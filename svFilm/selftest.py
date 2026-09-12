@@ -4,13 +4,14 @@
   python -m svFilm.selftest
 """
 import os
+import struct
 import sys
 import tempfile
 
 import numpy as np
 
-from . import (analyze, color, config as C, denoise, guard, io, local, metrics,
-               pipeline, spatial, stocks, style, tone)
+from . import (analyze, cameras, color, config as C, denoise, guard, io, local, metrics,
+               pipeline, rawmeta, spatial, stocks, style, tone)
 
 FAIL = []
 
@@ -22,10 +23,18 @@ def check(name, cond, extra=''):
 
 
 class _Cfg:
-    """config 的只读副本 + 覆盖几项 —— 给"开关类"测试用，不动全局 config。"""
+    """config 的只读副本 + 覆盖几项 —— 给"开关类"测试用，不动全局 config。
+
+    ⚠ 单测隔离（09-13 踩到）：**默认把「基准成色」置成不动**。
+    出厂默认改成 `BASE_FULL`（SV 拍板）之后，这里若跟着默认走，
+    "contrast=1.0 完全不动""支点 L*=50""neutral 卷 = 恒等"三条会一起变红 ——
+    那不是回归，是**测试测错了对象**（测的是"出厂默认"而不是"这一层"）。
+    要连着基准一起测，显式传 `_Cfg(BASE='BASE_FULL')`。
+    """
 
     def __init__(self, **kw):
         self._d = {k: getattr(C, k) for k in dir(C) if k.isupper()}
+        self._d['BASE'] = 'BASE_NONE'
         self._d.update(kw)
 
     def __getattr__(self, k):
@@ -268,9 +277,14 @@ def t_stocks():
         check('卷 %s 有名字/说明/颜色参数' % n,
               bool(s['label'] and s['desc'] and s['color']))
     d = _gray_img(gamma=0.8)
-    out, _ = style.apply(d, C, lock_ref=None, stock=stocks.get('neutral'))
+    # 这一条测的是"卷的恒等性"，所以必须把基准摘掉（否则测到的是出厂默认的全对齐）
+    out, _ = style.apply(d, C, lock_ref=None, stock=stocks.get('neutral'),
+                         base='BASE_NONE')
     check('neutral 卷 = 恒等（不风格化）', float(np.max(np.abs(out - d))) < 1e-9,
           'max %.2e' % float(np.max(np.abs(out - d))))
+    # 出厂默认是哪一档要显式守在这里（09-13 SV 拍板 = 全对齐）；改了必须在这里承认
+    check('出厂默认基准是合法档位', C.BASE in stocks.base_names(), C.BASE)
+    check('_Cfg 隔离基准（单测不跟出厂默认走）', _Cfg().BASE == 'BASE_NONE')
     # 每个卷的参数都要能跑通并给出有界结果
     grid = style.bake_grid(5).reshape(1, -1, 3)
     for n in stocks.names():
@@ -344,11 +358,124 @@ def t_pipeline_smoke():
     check('空间域 info 齐全', all(k in pi for k in ('grain', 'bloom', 'halation', 'any')))
 
 
+def _mn(entries):
+    """造一个最小的富士 MakerNote（只支持 SHORT / SRATIONAL）。
+
+    entries: [(tag, type, value)]；type 3 的 value 是 int，type 10 的 value 是 (分子, 分母)。
+    """
+    n = len(entries)
+    data_off = 12 + 2 + n * 12 + 4
+    body = struct.pack('<H', n)
+    blob = b''
+    for tag, typ, val in entries:
+        if typ == 3:
+            body += struct.pack('<HHI', tag, typ, 1) + struct.pack('<H', val) + b'\0\0'
+        elif typ == 10:
+            body += struct.pack('<HHII', tag, typ, 1, data_off + len(blob))
+            blob += struct.pack('<ii', val[0], val[1])
+        else:
+            raise ValueError('测试用的 MakerNote 只支持 SHORT/SRATIONAL')
+    return b'FUJIFILM' + struct.pack('<I', 12) + body + struct.pack('<I', 0) + blob
+
+
+class _Sample:
+    """给 pipeline._allow_lift 用的最小替身（只要 kind + cam）。"""
+
+    def __init__(self, kind, cam=None):
+        self.kind = kind
+        self.cam = cam or {}
+
+
+def t_entry_bias():
+    print('[入口基线曝光：MakerNote tag 语义]')
+    S, SR = 3, 10
+    # Manual/Raw 模式（实测 759 张全是这个）-> 看 0x1403
+    check('Manual 模式读 0x1403',
+          rawmeta.fuji_development_dr(_mn([(0x1402, S, 1), (0x1403, S, 400)])) == 400)
+    check('Manual 模式读 DR200',
+          rawmeta.fuji_development_dr(_mn([(0x1402, S, 1), (0x1403, S, 200)])) == 200)
+    # Auto 模式 -> 看 0x140b
+    check('Auto 模式读 0x140b',
+          rawmeta.fuji_development_dr(_mn([(0x1402, S, 0), (0x140b, S, 200)])) == 200)
+    # 模式读不到 -> 两个都试
+    check('无模式 tag 时回退 0x1403',
+          rawmeta.fuji_development_dr(_mn([(0x1403, S, 100)])) == 100)
+    check('无模式 tag 时回退 0x140b',
+          rawmeta.fuji_development_dr(_mn([(0x140b, S, 400)])) == 400)
+    # ★ 回归护栏：0x1402 是模式开关（值 0/1），**绝不能**被当成档位返回
+    check('0x1402 的值不当档位（Manual 缺 0x1403 时返回 None）',
+          rawmeta.fuji_development_dr(_mn([(0x1402, S, 1)])) is None)
+    check('0x1402 的值不当档位（Auto 缺 0x140b 时返回 None）',
+          rawmeta.fuji_development_dr(_mn([(0x1402, S, 0)])) is None)
+    check('非富士 MakerNote 不炸', rawmeta.fuji_development_dr(b'NIKON\x00\x00\x00') is None)
+    check('空 MakerNote 不炸', rawmeta.fuji_development_dr(None) is None)
+    # 精确 EV（0x9650）：绝大多数机身不写，写了就用
+    check('0x9650 读出精确 EV', abs(rawmeta.fuji_raw_ev(_mn([(0x9650, SR, (272, 100))])) - 2.72) < 1e-6)
+    check('0x9650 离谱值被丢弃', rawmeta.fuji_raw_ev(_mn([(0x9650, SR, (9999, 1))])) is None)
+    check('没有 0x9650 时返回 None', rawmeta.fuji_raw_ev(_mn([(0x1403, S, 400)])) is None)
+
+    print('[入口基线曝光：机型表 + DR 分层]')
+    fuji = cameras.lookup('FUJIFILM', 'X-T30 III')
+    check('富士机型命中', fuji['hit'] and fuji['key'] == 'x-t30 iii')
+    check('富士基底 = 0.72EV', abs(fuji['baseline_ev'] - 0.72) < 1e-9)
+    check('DR 表只放"额外"量 100/200/400 = 0/1/2',
+          cameras.dr_bias_ev(100) == 0.0 and cameras.dr_bias_ev(200) == 1.0
+          and cameras.dr_bias_ev(400) == 2.0)
+    check('不认识的 DR 档返回 None（表示"不知道"）',
+          cameras.dr_bias_ev(None) is None and cameras.dr_bias_ev(999) is None)
+    # 与 darktable 官方总表对齐：DR100 −0.72 / DR200 −1.72 / DR400 −2.72
+    tot = {dr: fuji['baseline_ev'] + cameras.dr_bias_ev(dr) for dr in (100, 200, 400)}
+    check('合计对上 darktable 总表 0.72/1.72/2.72',
+          abs(tot[100] - 0.72) < 1e-9 and abs(tot[200] - 1.72) < 1e-9 and abs(tot[400] - 2.72) < 1e-9,
+          '%.2f/%.2f/%.2f' % (tot[100], tot[200], tot[400]))
+    check('未知机型不猜（基底 0）', cameras.lookup('Canon', 'EOS R5')['baseline_ev'] == 0.0)
+
+    print('[入口曲线：实测曲线查表（Q1）]')
+    _saved_curve = dict(cameras.ENTRY_CURVE)
+    try:
+        # 表空 / 机型不认识 -> None（退回老的常数补偿，不能炸）
+        cameras.ENTRY_CURVE.clear()
+        check('表空时返回 None（退回常数补偿）', cameras.entry_curve('x-t30 iii', 400) is None)
+        cameras.ENTRY_CURVE.update({
+            'x-t30 iii': {
+                '400': dict(mid_ev=3.10, anchors=[[0.001, 0.70], [0.02, 1.00], [0.30, 1.25], [1.00, 0.22]]),
+                'None': dict(mid_ev=0.72, anchors=[[0.001, 0.90], [0.02, 1.00], [1.00, 0.5]]),
+            }})
+        check('机型不认识返回 None', cameras.entry_curve('nope', 400) is None)
+        c = cameras.entry_curve('X-T30 III', 400)          # 大小写不敏感
+        check('命中 -> 给出 mid_ev + 形状', c is not None and abs(c[0] - 3.10) < 1e-9)
+        check('锚点按输入线性升序', c[1] == sorted(c[1]))
+        mid_i = c[1].index(0.02)
+        check('形状在中灰处 = 1.0', abs(c[2][mid_i] - 1.0) < 1e-9)
+        c2 = cameras.entry_curve('x-t30 iii', None)        # dr 未知 -> 取 'None' 那条
+        check('dr=None 回退到 None 那条', c2 is not None and abs(c2[0] - 0.72) < 1e-9)
+        c3 = cameras.entry_curve('x-t30 iii', 800)         # dr 有但不认识 -> 回退
+        check('dr 不认识时回退', c3 is not None and abs(c3[0] - 0.72) < 1e-9)
+    finally:
+        cameras.ENTRY_CURVE.clear()
+        cameras.ENTRY_CURVE.update(_saved_curve)
+
+    print('[入口基线曝光：曝光层不再提亮]')
+    like = _Sample('raw', {'idt_bias_ev': 2.72})
+    check('入口补过 -> 不再提亮', pipeline._allow_lift(like, C) is False)
+    check('入口补 0 -> 允许兜底提亮', pipeline._allow_lift(_Sample('raw', {'idt_bias_ev': 0.0}), C) is True)
+    check('入口没这项(非富士) -> 允许兜底提亮',
+          pipeline._allow_lift(_Sample('raw', {}), C) is True)
+    check('JPG 一律不提亮', pipeline._allow_lift(_Sample('jpg'), C) is False)
+    # 端到端：同一张偏暗图，allow_lift False 时像素不动
+    d = _gray_img(gamma=0.9)
+    lin0 = _lin_from_disp(d)
+    rep = analyze.analyze(lin0, d, 'raw')
+    out_a, _ = tone.correct(lin0, rep, C, allow_lift=False)
+    check('allow_lift=False 时偏暗图逐像素不动',
+          float(np.max(np.abs(out_a - lin0))) < 1e-12, 'decision=%s' % rep['decision'])
+
+
 def main():
     for fn in (t_color, t_analyze, t_tone_mid_target, t_tone_monotone, t_style_lock,
                t_style_contrast_direction, t_denoise, t_guard, t_lut, t_io_roundtrip,
                t_stocks, t_spatial_off, t_spatial_grain, t_spatial_bloom_halation,
-               t_pipeline_smoke):
+               t_entry_bias, t_pipeline_smoke):
         fn()
     print('-' * 52)
     if FAIL:

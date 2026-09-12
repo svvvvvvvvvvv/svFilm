@@ -17,6 +17,7 @@ from PIL import Image, ImageOps
 
 from . import color
 from . import config as C
+from . import rawmeta
 
 try:
     import cv2
@@ -122,17 +123,19 @@ def load_std(path, max_side=C.MAX_SIDE):
 
 
 def load_raw(path, max_side=C.MAX_SIDE):
-    """RAW 解码 + IDT（白平衡 / 色彩矩阵由 rawpy 完成；基线增益查机型表，加机型不改代码）。"""
+    """RAW 解码 + IDT（白平衡 / 色彩矩阵由 rawpy 完成；**基线曝光**按机型表 + DR tag 补回）。"""
     import rawpy
     from . import cameras
 
     kw = dict(C.RAW_DECODE)
     exif = None
     make = model = None
+    thumb = None
     with rawpy.imread(path) as raw:      # 一次打开：解码 + 缩略图（拿 EXIF 和机型）
         try:
             th = raw.extract_thumb()
             if th.format == rawpy.ThumbFormat.JPEG:
+                thumb = th.data
                 tmp = ImageOps.exif_transpose(Image.open(_stdlib_io.BytesIO(th.data)))
                 ex = tmp.getexif()
                 make = str(ex.get(271) or '') or None
@@ -151,10 +154,56 @@ def load_raw(path, max_side=C.MAX_SIDE):
     lin = rgb.astype(np.float64) / 65535.0
     lin = np.clip(lin, 0.0, None)          # 只挡负值，不夹上限（高光余量要留着给 L1）
 
+    # ---- 基线曝光（baseline exposure）：相机故意欠曝那几档，在这里一次补回来 ----
+    # 相机厂商把"把中点抬到 18%"的活留给转换器做（DNG 里叫 baseline exposure），
+    # Adobe 系静默做掉。富士还要按 DR 档额外欠曝 1~2 档，档位写在 RAF 的 MakerNote 里。
     cam = dict(cameras.lookup(make, model), make=make, model=model)
-    gain = float(2.0 ** float(cam['baseline_ev']))
-    if gain != 1.0:
-        lin = lin * gain
+    bias = 0.0
+    dr = None
+    raw_ev = None
+    curve = None
+    # ⚠ `ENTRY_BIAS_ENABLE` 必须管住**整件事**（机型基底 + DR 额外量 + 曲线）。
+    #   之前把"×2^baseline_ev"写在开关外面 ⇒ 关掉开关照样补 0.72 档，
+    #   A/B 实验的"未补偿"组其实已经带了补偿，结论会被带偏。
+    if C.ENTRY_BIAS_ENABLE:
+        bias = float(cam['baseline_ev'])
+        if thumb is not None:
+            try:
+                mn = rawmeta.thumb_makernote(thumb)
+                dr = rawmeta.fuji_development_dr(mn)
+                raw_ev = rawmeta.fuji_raw_ev(mn)
+            except Exception:
+                dr, raw_ev = None, None
+        # ★ 优先：实测入口曲线（零点 + 形状一起给，逐 机型×DR 一组）
+        curve = cameras.entry_curve(model, dr)
+        if curve is not None:
+            bias = float(curve[0])
+            cam['bias_source'] = '实测入口曲线 DR%s' % dr
+        elif raw_ev is not None:
+            # 机身直接写了精确 EV（已含基础偏移）—— 次优，只有零点没有形状
+            bias = float(raw_ev)
+            cam['bias_source'] = 'tag 0x9650'
+        else:
+            dr_ev = cameras.dr_bias_ev(dr)
+            if dr_ev is not None:
+                bias += float(dr_ev)
+                cam['dr_bias_ev'] = float(dr_ev)
+                cam['bias_source'] = 'DR%s 查表' % dr
+            else:
+                cam['bias_source'] = '仅机型基底（无 DR tag）'
+    cam['fuji_dr'] = dr
+    cam['idt_bias_ev'] = bias              # 下游据此判断"入口补过了没有"
+    if curve is not None:
+        # 实测曲线：零点 = 2^mid_ev，形状按**亮度**查（三通道同增益，不改色相）
+        mid_ev, xs, ys = curve
+        Y = color.luma(np.clip(lin, 0.0, None))
+        shape = np.interp(Y, xs, ys)
+        lin = lin * (float(2.0 ** mid_ev) * shape)[..., np.newaxis]
+        cam['entry_curve'] = 'DR%s(%d 锚点)' % (dr, len(xs))
+    else:
+        gain = float(2.0 ** bias)
+        if gain != 1.0:
+            lin = lin * gain
 
     lin, wb_info = idt_wb(lin)
     disp = np.clip(color.l2s(lin), 0.0, 1.0)

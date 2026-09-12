@@ -32,14 +32,17 @@ def analyze(lin, disp, kind='raw'):
     dead_white = float(np.mean(g >= (254.0 / 255.0)))
     near_white = float(np.mean(g >= 0.90))
 
-    # 有效曝光偏差（相对中灰靶），只用来做报告/限幅，不用来决定"要不要动"
+    # 有效曝光偏差（相对上限护栏），**只用来做报告**，不用来决定"要不要提亮"
     ev_est = float(np.log2(max(gm, C.NOISE_FLOOR) / C.TGT_MID))
 
-    # 决策：超中灰靶 + 死区才动手；其余一律不动（含"本来就暗"的图）
+    # 决策：中灰只当**上限护栏**（"亮得过分就压回来"），不再当提亮靶。
+    # ⚠ 09-13 起 TGT_MID 不再是"中灰靶"：中位数是内容量（画面里暗的东西占多少），
+    #   不是曝光量。拿它提亮会把每张图都拽到同一个中间灰（园岭实测：相机 66/104/173/177/236
+    #   的片子被拉成 89/121/132/133/137）。欠曝该在入口按 baseline exposure 补（见 io.load_raw）。
     if gm > C.TGT_MID + C.MID_DEADZONE:
-        decision = 'compress'
+        decision = 'compress'          # 亮得过分 -> 压回来（这就是"救过曝"）
     elif gm < C.TGT_MID - C.MID_DEADZONE:
-        decision = 'below'
+        decision = 'below'             # 偏暗：入口补过就不动；入口补不了才允许兜底提亮
     else:
         decision = 'hold'
 
@@ -61,9 +64,13 @@ def analyze(lin, disp, kind='raw'):
 
 
 def summarize(rep):
-    """一行给人看的摘要（讲人话，不甩代号）"""
+    """一行给人看的摘要（讲人话，不甩代号）。
+
+    ⚠ 这一行的每一个数都是**原片**（L0 analyze 的输入）的，不是成片的。
+    汇报时必须带「原片」二字，否则会被读成"我拿到的图死白这么多"。
+    """
     return (
-        "中灰 {:.0f}/255 (L*{:.0f}) | 黑点 {:.0f} | 白点 {:.0f} | "
+        "原片 中灰 {:.0f}/255 (L*{:.0f}) | 黑点 {:.0f} | 白点 {:.0f} | "
         "死白 {:.2%} | 彩度P90 {:.1f} | {}".format(
             rep['gray_mid'] * 255, rep['L_pcts'][C.PCT_MID],
             rep['gray_black'] * 255, rep['gray_white'] * 255,
