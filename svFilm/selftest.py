@@ -430,7 +430,7 @@ def t_entry_bias():
           '%.2f/%.2f/%.2f' % (tot[100], tot[200], tot[400]))
     check('未知机型不猜（基底 0）', cameras.lookup('Canon', 'EOS R5')['baseline_ev'] == 0.0)
 
-    print('[入口曲线：实测曲线查表（Q1）]')
+    print('[入口曲线：实测相机曲线查表（Q1）]')
     _saved_curve = dict(cameras.ENTRY_CURVE)
     try:
         # 表空 / 机型不认识 -> None（退回老的常数补偿，不能炸）
@@ -438,15 +438,20 @@ def t_entry_bias():
         check('表空时返回 None（退回常数补偿）', cameras.entry_curve('x-t30 iii', 400) is None)
         cameras.ENTRY_CURVE.update({
             'x-t30 iii': {
-                '400': dict(mid_ev=3.10, anchors=[[0.001, 0.70], [0.02, 1.00], [0.30, 1.25], [1.00, 0.22]]),
-                'None': dict(mid_ev=0.72, anchors=[[0.001, 0.90], [0.02, 1.00], [1.00, 0.5]]),
+                # anchors = [[输入线性亮度, 增益倍数], ...]，弓形：暗部抬得多、高光收
+                '400': dict(mid_ev=3.10, anchors=[[0.001, 5.0], [0.02, 7.0], [0.18, 8.57],
+                                                  [0.30, 8.0], [1.0, 1.0]]),
+                'None': dict(mid_ev=0.72, anchors=[[0.001, 1.4], [0.18, 1.647], [1.0, 1.0]]),
             }})
         check('机型不认识返回 None', cameras.entry_curve('nope', 400) is None)
         c = cameras.entry_curve('X-T30 III', 400)          # 大小写不敏感
-        check('命中 -> 给出 mid_ev + 形状', c is not None and abs(c[0] - 3.10) < 1e-9)
+        check('命中 -> 给出 mid_ev + 增益锚点', c is not None and abs(c[0] - 3.10) < 1e-9)
         check('锚点按输入线性升序', c[1] == sorted(c[1]))
-        mid_i = c[1].index(0.02)
-        check('形状在中灰处 = 1.0', abs(c[2][mid_i] - 1.0) < 1e-9)
+        check('零点自洽：Y=0.18 处的增益 = 2^mid_ev（±0.05 档）',
+              abs(np.log2(np.interp(0.18, c[1], c[2])) - c[0]) < 0.05,
+              '%.3f vs %.3f' % (np.log2(np.interp(0.18, c[1], c[2])), c[0]))
+        check('增益是"弓形"（中间调最高，暗部/高光都比它低）',
+              c[2][2] > c[2][0] and c[2][2] > c[2][-1])
         c2 = cameras.entry_curve('x-t30 iii', None)        # dr 未知 -> 取 'None' 那条
         check('dr=None 回退到 None 那条', c2 is not None and abs(c2[0] - 0.72) < 1e-9)
         c3 = cameras.entry_curve('x-t30 iii', 800)         # dr 有但不认识 -> 回退
@@ -454,6 +459,20 @@ def t_entry_bias():
     finally:
         cameras.ENTRY_CURVE.clear()
         cameras.ENTRY_CURVE.update(_saved_curve)
+
+    # 曲线怎么套：三通道同一个倍率（只动亮度）＋ 弓形（暗部倍率 > 高光倍率）
+    _cv = (3.10, [0.001, 0.18, 0.60, 1.0], [5.0, 8.57, 2.0, 1.0])
+    _g = np.array([[[0.18, 0.18, 0.18]]])
+    check('曲线把 18% 中性灰抬 2^mid_ev 倍',
+          abs(io.apply_entry_curve(_g, _cv)[0, 0, 0] / 0.18 - 8.57) < 0.02)
+    _c = np.array([[[0.30, 0.15, 0.075]]])
+    _r = io.apply_entry_curve(_c, _cv)[0, 0] / _c[0, 0]
+    check('曲线不改色相（三通道同一个倍率）', float(_r.max() - _r.min()) < 1e-12)
+    check('弓形：中间调倍率最高（暗部、高光都比它低）',
+          io.apply_entry_curve(_g, _cv)[0, 0, 0] / 0.18
+          > io.apply_entry_curve(np.array([[[0.001] * 3]]), _cv)[0, 0, 0] / 0.001
+          and io.apply_entry_curve(_g, _cv)[0, 0, 0] / 0.18
+          > io.apply_entry_curve(np.array([[[0.60] * 3]]), _cv)[0, 0, 0] / 0.60)
 
     print('[入口基线曝光：曝光层不再提亮]')
     like = _Sample('raw', {'idt_bias_ev': 2.72})
