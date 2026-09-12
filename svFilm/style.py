@@ -84,41 +84,55 @@ def cube_apply(disp, cube):
     return out
 
 
-# ---------------- 内置胶片色 ----------------
+# ---------------- 内置颜色模型 ----------------
 def _builtin(disp, cfg, stock=None):
+    """按"量出来的数"给颜色。一次 Lab 往返做完，顺序：
+
+      ① 线性域 3x3（负片交调，默认恒等）
+      ② 色偏：整体 a*/b* + 按亮度分裂的 b*（暗部/亮部分开，对齐大师那把尺子）
+      ③ 彩度：C' = s·Cref·(C/Cref)^p —— 两个自由度正好对上"彩度中位"和"彩度P90"两个靶
+      ④ 明度对比（只动 L*，a/b 不动 → 对比不脏色）
+
+    色偏在纯黑纯白两端淡出：纯黑不该有颜色，纯白也不该被染色（否则高光被染脏、还容易削顶）。
+    """
     p = stocks.color_params(cfg, stock)
+
     lin = color.s2l(disp)
-
-    # a1) 色交叉（负片染料交调），线性域，很小的一套系数
     M = np.asarray(p['matrix'], np.float64)
-    lin = lin @ M.T
+    if not np.allclose(M, np.eye(3), atol=1e-9):
+        lin = lin @ M.T
+    out = np.clip(color.l2s(np.clip(lin, 0.0, None)), 0.0, 1.0)
 
-    out = color.l2s(np.clip(lin, 0.0, None))
-    g = color.gray_of(disp)
+    has_tint = (abs(p['a']) + abs(p['b']) + abs(p['b_sh']) + abs(p['b_hi'])) > 1e-6
+    has_chroma = abs(p['chroma_p'] - 1.0) > 1e-6 or abs(p['chroma_s'] - 1.0) > 1e-6
+    has_contrast = abs(p['contrast'] - 1.0) > 1e-6
+    if not (has_tint or has_chroma or has_contrast):
+        return np.clip(out, 0.0, 1.0)
 
-    # a2) 分裂色调：暗部一侧 + 亮部一侧（加性，尺度很小）
-    s_lo = 1.0 - color.smoothstep(g, p['tint_lo'], p['tint_hi'])
-    s_hi = color.smoothstep(g, p['tint_lo'], p['tint_hi'])
-    out = out + s_lo[..., None] * np.asarray(p['shadow_tint']) \
-        + s_hi[..., None] * np.asarray(p['hilight_tint'])
+    lab = color.to_lab(out)
+    L = lab[..., 0]
 
-    # b) 明度对比：只动 L*，a/b 原样 → 对比不会把颜色带脏
-    if abs(p['contrast'] - 1.0) > 1e-6:
-        lab = color.to_lab(np.clip(out, 0.0, 1.0))
+    if has_tint:
+        w = color.smoothstep(L, p['tint_lo'], p['tint_hi'])            # 0 = 暗部, 1 = 亮部
+        fade = color.smoothstep(L, 2.0, 8.0) * (1.0 - color.smoothstep(L, 97.0, 100.0))
+        lab[..., 1] += p['a'] * fade
+        lab[..., 2] += (p['b'] + (1.0 - w) * p['b_sh'] + w * p['b_hi']) * fade
+
+    if has_chroma:
+        a2, b2 = lab[..., 1], lab[..., 2]
+        C = np.sqrt(a2 * a2 + b2 * b2)
+        Cr = float(p['chroma_ref'])
+        Cn = p['chroma_s'] * Cr * np.power(np.maximum(C, 1e-6) / Cr, p['chroma_p'])
+        k = np.where(C > 1e-6, Cn / np.maximum(C, 1e-6), 1.0)
+        lab[..., 1] = a2 * k
+        lab[..., 2] = b2 * k
+
+    if has_contrast:
         a = float(np.clip((p['contrast'] - 1.0) * 0.15, -0.10, 0.12))
         u = np.clip(lab[..., 0] / 100.0, 0.0, 1.0)
-        u2 = np.clip(u + a * np.sin(2.0 * np.pi * u), 0.0, 1.0)
-        lab[..., 0] = u2 * 100.0
-        out = color.from_lab(lab)
+        lab[..., 0] = np.clip(u + a * np.sin(2.0 * np.pi * u), 0.0, 1.0) * 100.0
 
-    # a3) 彩度
-    if abs(p['chroma'] - 1.0) > 1e-6:
-        lab = color.to_lab(np.clip(out, 0.0, 1.0))
-        lab[..., 1] *= p['chroma']
-        lab[..., 2] *= p['chroma']
-        out = color.from_lab(lab)
-
-    return np.clip(out, 0.0, 1.0)
+    return np.clip(color.from_lab(lab), 0.0, 1.0)
 
 
 def mid_of(disp):

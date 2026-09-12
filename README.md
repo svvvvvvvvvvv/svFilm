@@ -22,11 +22,17 @@
 
 一个"卷"就是一份数据，两半：
 
-* **颜色**（L2 用）：色交叉矩阵 / 暗部色调 / 亮部色调 / 彩度 / 明度对比
+* **颜色**（L2 用）：a\*/b\* 偏移、暗部·亮部 b\* 分离、彩度(p, s)、明度对比
 * **空间**（`spatial.py` 用）：颗粒 / 黑柔 / Halation 的强度
 
 现有 7 卷：`neutral`（什么都不做的基准）、`portra400`、`pro400h`、`fuji_c200`、`ektar100`、
 `cinestill800t`（带 Halation）、`air`。
+
+**数值是量出来的，不是手编的**（v0.2.1 起）：卷名/方向继承 09-10《胶片卷映射与分组策略》，
+颜色数值由 `_debug/calib_stocks_from_masters.py` 从 **1170 张大师成片**（`master_resurvey.json`）量出。
+口径 =「取神不取形」：**卷 = 这条作者线相对"大师全体中位"的性格偏移**。
+逐卷证据 → `效果debug/<日期>/卷标定_大师颜色聚类/卷标定报告.md`。
+只有 `pro400h` 没标定（数据里没有"青绿粉彩"那条线）→ `calibrated=False`，仍是手写。
 
 为什么空间三件必须单独一层：`.cube` 是**逐像素查表**，只能装颜色和影调；
 颗粒、黑柔（光学扩散）、Halation（片基红光散射）都是**看邻域**的运算，LUT 装不下。
@@ -62,10 +68,25 @@ $PY _debug/make_sheet.py        --purpose <目的> <stem...>   # 分段：底/�
 $PY _debug/make_stock_sheet.py  --purpose <目的> <stem...>   # 卷对照：一张图 x 各卷
 $PY _debug/make_spatial_sheet.py --purpose <目的> <stem...>  # 空间域：逐个开颗粒/黑柔/Halation（默认 1:1 切图）
 $PY _debug/make_crop.py         --purpose <目的> <stem...>   # 100% 细节切图
+$PY _debug/lab_ours_fingerprint.py --stocks neutral --tag 基线14 <14 张探针>  # 量我方指纹 / 验收落带
+$PY _debug/calib_stocks_from_masters.py --ours <基线.json>   # 从大师作品量出卷参数 → 抄回 stocks.py
+```
+
+### 卷的标定链（路 B，改口径必须整条重跑）
+
+```
+lab_ours_fingerprint.py --stocks neutral  →  基线14.json        （我方起点）
+master_resurvey.json（1170 张大师成片）   →  大师九条线的指纹
+        ↓ calib_stocks_from_masters.py
+   stock_calib.json + 卷标定报告.md  →  抄进 svFilm/stocks.py 的 TABLE
+        ↓
+lab_ours_fingerprint.py --stocks <各卷> --tag 验收  →  看有没有落进大师带
 ```
 
 ## 还没做（下一步）
 
 - **没有降噪层**：RAW 提 3~4 档会把暗部传感器色斑/噪点一起放大（看 100% 细节图最明显）。
-- 卷的颜色参数目前是"按各卷公开性格手写"的近似，还没用色卡实拍标定。
+- **中性路径与大师平均还有系统性差**（偏暖 2.5 个 b\*、彩度形状偏陡 0.6、黑位死黑无雾）——
+  这**没有**塞进卷里，单独列在标定报告 §四等拍板。三档：① 只加雾 ② 退黄+加雾 ③ 全对齐。
+- 卷要"名副其实"（叫 Portra 就真是 Portra）得走**路 A：色卡实拍标定**；现在量到的是"这些摄影师后期风格"（取神不取形）。
 - 外层这版只是"一次冲洗、三锚点"；胶片真实的欠曝/正常/过曝三态（同一卷三种性格）没做。

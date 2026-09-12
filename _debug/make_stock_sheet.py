@@ -19,7 +19,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from svFilm import color, config as C, io, paths, pipeline, stocks  # noqa: E402
+from svFilm import color, config as C, io, paths, pipeline, spatial, stocks  # noqa: E402
 
 FONT = 'C:/Windows/Fonts/msyh.ttc'
 FONT_B = 'C:/Windows/Fonts/msyhbd.ttc'
@@ -36,8 +36,18 @@ def _font(size, bold=False):
     return ImageFont.load_default()
 
 
-def _cell(u8):
+def _cell(u8, crop=None):
     im = Image.fromarray(u8)
+    if crop is not None:
+        # 100% 细节：按归一化中心切一个 CW x CH 的原尺寸窗口（各列同一切法）
+        cx, cy = crop
+        W, H = im.size
+        if W >= CW and H >= CH:
+            x = int(W * cx - CW / 2.0)
+            y = int(H * cy - CH / 2.0)
+            x = max(0, min(W - CW, x))
+            y = max(0, min(H - CH, y))
+            return im.crop((x, y, x + CW, y + CH))
     if im.size != (CW, CH):
         r = max(CW / im.width, CH / im.height)
         im = im.resize((int(im.width * r) + 1, int(im.height * r) + 1), Image.LANCZOS)
@@ -65,16 +75,31 @@ def _stats(disp):
         np.percentile(g, C.PCT_WHITE) * 255, color.chroma_c90(np.clip(disp, 0, 1)), a, b)
 
 
+def _auto_center_norm(disp):
+    """自动找"皮肤最多的地方"（归一化坐标），颗粒/光晕最容易在脸上看出差别。"""
+    import cv2
+    m = spatial._skin_mask_fast(np.clip(disp, 0, 1))
+    if float(m.max()) < 0.15:
+        return None
+    h = m.shape[0]
+    ramp = 1.0 - color.smoothstep(np.arange(h, dtype=np.float64) / max(h - 1, 1), 0.55, 0.95)
+    m = m * ramp[:, None]
+    s = cv2.blur(np.ascontiguousarray(m, np.float32), (CW // 2, CH // 2))
+    y, x = np.unravel_index(int(np.argmax(s)), s.shape)
+    return (float(x) / m.shape[1], float(y) / m.shape[0])
+
+
 def _job(t):
     path, max_side, stock, is_base = t
     res = pipeline.run(path, src='raw', max_side=max_side,
                        stock=(None if is_base else stock), keep_stages=True)
     d = res.sample.disp if is_base else res.disp
-    return (path, ('base' if is_base else stock), color.display_to_u8(d), _stats(d))
+    ctr = _auto_center_norm(d) if is_base else None
+    return (path, ('base' if is_base else stock), color.display_to_u8(d), _stats(d), ctr)
 
 
 def build(stems, purpose, stock_list, root=None, tag=None, date=None,
-          max_side=1200, jobs=4):
+          max_side=1200, jobs=4, crop=None):
     root = root or (os.path.dirname(os.path.abspath(os.path.splitext(stems[0])[0])) or '.')
     raw_paths = []
     for st in stems:
@@ -98,8 +123,8 @@ def build(stems, purpose, stock_list, root=None, tag=None, date=None,
 
     got = {}
     with cf.ProcessPoolExecutor(max_workers=max(1, jobs)) as ex:
-        for p, key, u8, su in ex.map(_job, tasks):
-            got[(p, key)] = (u8, su)
+        for p, key, u8, su, ctr in ex.map(_job, tasks):
+            got[(p, key)] = (u8, su, ctr)
             print('  ok  %-14s %-14s' % (os.path.basename(p), key))
             sys.stdout.flush()
 
@@ -109,19 +134,23 @@ def build(stems, purpose, stock_list, root=None, tag=None, date=None,
     H = lh + len(raw_paths) * (CH + 8)
     sheet = Image.new('RGB', (W, H), (18, 18, 18))
     d0 = date or paths.today()
-    ImageDraw.Draw(sheet).text(
-        (10, 7), 'svFilm 卷对照 · %s   ——   左一是 RAW 未修，往右是各卷成片      [%s]' % (d0, purpose),
-        font=_font(20, True), fill=(255, 255, 255))
+    title = 'svFilm 卷对照 · %s   ——   左一是 RAW 未修，往右是各卷成片      [%s]' % (d0, purpose)
+    if crop:
+        title = 'svFilm 卷对照(100%%细节) · %s   ——   左一是 RAW 未修，往右是各卷成片      [%s]' % (d0, purpose)
+    ImageDraw.Draw(sheet).text((10, 7), title, font=_font(20, True), fill=(255, 255, 255))
 
     y = lh
     for rp in raw_paths:
         x = 0
-        u8, su = got[(rp, 'base')]
-        sheet.paste(_tag(_cell(u8), '0 RAW 未修', su), (x, y))
+        ctr = crop
+        if ctr == 'auto':
+            ctr = got[(rp, 'base')][2] or (0.5, 0.4)
+        u8, su, _ = got[(rp, 'base')]
+        sheet.paste(_tag(_cell(u8, ctr), '0 RAW 未修', su), (x, y))
         x += CW + 5
         for s in stock_list:
-            u8, su = got[(rp, s)]
-            sheet.paste(_tag(_cell(u8), stocks.label_of(s), su, True), (x, y))
+            u8, su, _ = got[(rp, s)]
+            sheet.paste(_tag(_cell(u8, ctr), stocks.label_of(s), su, True), (x, y))
             x += CW + 5
         ImageDraw.Draw(sheet).text((8, y + CH - FTR + 2), os.path.basename(rp),
                                    font=_font(14), fill=(120, 255, 160))
@@ -145,5 +174,13 @@ if __name__ == '__main__':
     ap.add_argument('--date', default=None)
     ap.add_argument('--max-side', type=int, default=1200, dest='max_side')
     ap.add_argument('--jobs', type=int, default=4)
+    ap.add_argument('--crop', nargs='+', default=None,
+                    help="100%% 细节：--crop auto 自动找脸，或给两个归一化中心 --crop CX CY（配 --max-side 2048 看真实像素）")
     a = ap.parse_args()
-    build(a.stems, a.purpose, a.stocks, a.root, a.tag, a.date, a.max_side, a.jobs)
+    crop = None
+    if a.crop:
+        if a.crop[0] == 'auto':
+            crop = 'auto'
+        elif len(a.crop) >= 2:
+            crop = (float(a.crop[0]), float(a.crop[1]))
+    build(a.stems, a.purpose, a.stocks, a.root, a.tag, a.date, a.max_side, a.jobs, crop)
