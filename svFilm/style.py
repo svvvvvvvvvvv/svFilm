@@ -18,6 +18,7 @@ import numpy as np
 
 from . import color
 from . import config as C
+from . import stocks
 from . import tone
 
 
@@ -84,36 +85,37 @@ def cube_apply(disp, cube):
 
 
 # ---------------- 内置胶片色 ----------------
-def _builtin(disp, cfg):
+def _builtin(disp, cfg, stock=None):
+    p = stocks.color_params(cfg, stock)
     lin = color.s2l(disp)
 
     # a1) 色交叉（负片染料交调），线性域，很小的一套系数
-    M = np.asarray(cfg.FILM_MATRIX, np.float64)
+    M = np.asarray(p['matrix'], np.float64)
     lin = lin @ M.T
 
     out = color.l2s(np.clip(lin, 0.0, None))
     g = color.gray_of(disp)
 
     # a2) 分裂色调：暗部一侧 + 亮部一侧（加性，尺度很小）
-    s_lo = 1.0 - color.smoothstep(g, cfg.TINT_LO, cfg.TINT_HI)
-    s_hi = color.smoothstep(g, cfg.TINT_LO, cfg.TINT_HI)
-    out = out + s_lo[..., None] * np.asarray(cfg.FILM_SHADOW_TINT) \
-        + s_hi[..., None] * np.asarray(cfg.FILM_HILIGHT_TINT)
+    s_lo = 1.0 - color.smoothstep(g, p['tint_lo'], p['tint_hi'])
+    s_hi = color.smoothstep(g, p['tint_lo'], p['tint_hi'])
+    out = out + s_lo[..., None] * np.asarray(p['shadow_tint']) \
+        + s_hi[..., None] * np.asarray(p['hilight_tint'])
 
     # b) 明度对比：只动 L*，a/b 原样 → 对比不会把颜色带脏
-    if abs(cfg.CONTRAST - 1.0) > 1e-6:
+    if abs(p['contrast'] - 1.0) > 1e-6:
         lab = color.to_lab(np.clip(out, 0.0, 1.0))
-        a = float(np.clip((cfg.CONTRAST - 1.0) * 0.15, -0.10, 0.12))
+        a = float(np.clip((p['contrast'] - 1.0) * 0.15, -0.10, 0.12))
         u = np.clip(lab[..., 0] / 100.0, 0.0, 1.0)
         u2 = np.clip(u + a * np.sin(2.0 * np.pi * u), 0.0, 1.0)
         lab[..., 0] = u2 * 100.0
         out = color.from_lab(lab)
 
     # a3) 彩度
-    if abs(cfg.CHROMA_SCALE - 1.0) > 1e-6:
+    if abs(p['chroma'] - 1.0) > 1e-6:
         lab = color.to_lab(np.clip(out, 0.0, 1.0))
-        lab[..., 1] *= cfg.CHROMA_SCALE
-        lab[..., 2] *= cfg.CHROMA_SCALE
+        lab[..., 1] *= p['chroma']
+        lab[..., 2] *= p['chroma']
         out = color.from_lab(lab)
 
     return np.clip(out, 0.0, 1.0)
@@ -141,15 +143,16 @@ def lock_mid(disp, ref_mid, max_gain=1.25):
     return np.clip(out, 0.0, 1.0), float(np.log2(k))
 
 
-def apply(disp, cfg=C, lut=None, lock_ref=None):
-    out = _builtin(disp, cfg)
+def apply(disp, cfg=C, lut=None, lock_ref=None, stock=None):
+    out = _builtin(disp, cfg, stock)
 
     if lut is not None:
         c = cube_apply(np.clip(out, 0.0, 1.0), lut)
         s = cfg.LUT_STRENGTH
         out = np.clip(out * (1.0 - s) + c * s, 0.0, 1.0)
 
-    info = dict(lut=bool(lut is not None), lock_ev=0.0)
+    info = dict(lut=bool(lut is not None), lock_ev=0.0,
+                stock=(stock or {}).get('name'))
     if cfg.LOCK_MID and lock_ref is not None:
         out, ev = lock_mid(out, lock_ref)
         info['lock_ev'] = ev
@@ -164,13 +167,18 @@ def bake_grid(size=33):
     return np.stack([R, G, B], axis=-1).reshape(-1, 3)
 
 
-def bake_cube(path, size=33, cfg=C, chunk=4096):
-    """把 L2 层离线烘成 .cube（不含 LOCK_MID，那是逐图的）。"""
+def bake_cube(path, size=33, cfg=C, chunk=4096, stock=None):
+    """把 L2 层离线烘成 .cube（不含 LOCK_MID，那是逐图的）。
+
+    给了 stock 就烘那一卷的颜色性格 —— 这样"卷"可以落成一个 .cube 文件，
+    别的软件（达芬奇/PS）也能直接用同一套颜色。
+    """
     grid = bake_grid(size)
     out = np.empty_like(grid)
     for i in range(0, grid.shape[0], chunk):
         blk = grid[i:i + chunk].reshape(1, -1, 3)
-        o, _ = apply(blk, cfg, lock_ref=None)      # 烘焙时不做锁中灰（那是逐图的）
+        o, _ = apply(blk, cfg, lock_ref=None, stock=stock)   # 烘焙时不做锁中灰（那是逐图的）
         out[i:i + chunk] = o.reshape(-1, 3)
     cube = out.reshape(size, size, size, 3)
-    return cube_write(path, cube, title='svFilm L2 style / display domain')
+    title = 'svFilm L2 style / display domain' + (' / ' + stock['name'] if stock else '')
+    return cube_write(path, cube, title=title)

@@ -14,15 +14,16 @@ import json
 import os
 import sys
 
-from . import analyze, config as C, io, style
+from . import analyze, config as C, io, stocks, style
 
 
 def _fmt_probe(res):
     a = res.report['analyze']
     g = a['gray255']
-    return ('%-16s %-4s 中灰%6.1f(L*%5.1f) 黑%5.1f 白%6.1f '
+    return ('%-16s %-4s %-12s 中灰%6.1f(L*%5.1f) 黑%5.1f 白%6.1f '
             '死白%6.2f%% 彩度P90 %5.1f  ev%+5.2f  → %s' % (
                 res.sample.name, res.sample.kind,
+                (res.report.get('stock') or 'config默认'),
                 g[C.PCT_MID], a['L_pcts'][C.PCT_MID],
                 g[C.PCT_BLACK], g[C.PCT_WHITE],
                 a['dead_white_frac'] * 100.0, a['chroma_c90'],
@@ -32,15 +33,17 @@ def _fmt_probe(res):
 def cmd_probe(args):
     from . import pipeline
     for p in _expand(args.inputs, args.recursive):
-        res = pipeline.run(p, src=args.src, max_side=args.max_side)
+        res = pipeline.run(p, src=args.src, max_side=args.max_side, stock=args.stock)
         line = _fmt_probe(res)
         if args.after:
             r = res.report
             g = r['guard']
             t = r['tone']
-            line += '  ||  出片 中灰%6.1f 死白%6.2f%% 彩度%5.1f  修正%s' % (
+            sp = r.get('spatial') or {}
+            line += '  ||  出片 中灰%6.1f 死白%6.2f%% 彩度%5.1f  修正%s  空间%s' % (
                 _gray_mid(res.disp) * 255.0, g['dead_white_frac'] * 100.0, g['chroma_c90'],
-                ('%+.2fEV' % t['ev_mid']) if t['applied'] else '未触发')
+                ('%+.2fEV' % t['ev_mid']) if t['applied'] else '未触发',
+                ('有' if sp.get('any') else '无'))
         print(line)
     return 0
 
@@ -94,7 +97,7 @@ def _gray_mid(disp):
 
 def cmd_one(args):
     from . import pipeline
-    res = pipeline.run(args.input, src=args.src, max_side=args.max_side)
+    res = pipeline.run(args.input, src=args.src, max_side=args.max_side, stock=args.stock)
     out = args.out or (os.path.splitext(args.input)[0] + '_svFilm.jpg')
     res.save(out)
     print(res.summary())
@@ -107,15 +110,16 @@ def cmd_one(args):
 
 def _worker(t):
     from . import pipeline
-    src, max_side, outdir, p = t
+    src, max_side, outdir, p, stock = t
     name = os.path.splitext(os.path.basename(p))[0]
     # 输出名带 _svFilm 后缀：不能叫 <名字>.jpg —— 那会和"相机直出同名 JPG"撞名字，
     # 下游一旦按"同名 JPG = 机内直出"去解读，就会把自己的产出当成相机底来看
-    out = os.path.join(outdir, name + '_svFilm.jpg')
+    suffix = '_svFilm' + (('_' + stock) if stock else '')
+    out = os.path.join(outdir, name + suffix + '.jpg')
     if os.path.abspath(out) == os.path.abspath(p):
         return (p, None, '', '输出会覆盖输入，已跳过')
     try:
-        res = pipeline.run(p, src=src, max_side=max_side)
+        res = pipeline.run(p, src=src, max_side=max_side, stock=stock)
         res.save(out)
         return (p, out, res.summary(), None)
     except Exception as e:                                  # noqa: BLE001
@@ -137,7 +141,7 @@ def cmd_dir(args):
     sys.stdout.flush()
 
     from . import pipeline
-    tasks = [(args.src, args.max_side, args.out, p) for p in ps]
+    tasks = [(args.src, args.max_side, args.out, p, args.stock) for p in ps]
     done = fail = 0
     if jobs == 1:
         for t in tasks:
@@ -166,8 +170,23 @@ def cmd_bake(args):
     else:
         out = args.out
     os.makedirs(os.path.dirname(os.path.abspath(out)) or '.', exist_ok=True)
-    style.bake_cube(out, size=args.size)
-    print('已烘焙 -> %s (size %d)' % (os.path.abspath(out), args.size))
+    st = stocks.get(args.stock)
+    style.bake_cube(out, size=args.size, stock=st)
+    print('已烘焙 -> %s (size %d%s)' % (os.path.abspath(out), args.size,
+                                     (', 卷 ' + st['label']) if st else ''))
+    return 0
+
+
+def cmd_stocks(args):
+    """列出所有卷（人话说明）。"""
+    print('%-16s %-14s %s' % ('卷名', '中文名', '一句话'))
+    print('-' * 92)
+    for n in stocks.names():
+        s = stocks.TABLE[n]
+        flag = ' ←' if (args.stock or C.STOCK) == n else ''
+        print('%-16s %-14s %s%s' % (n, s['label'], s['desc'], flag))
+    print('-' * 92)
+    print('用法：--stock <卷名>；不指定 = config.STOCK（当前 %s）' % (C.STOCK or 'None'))
     return 0
 
 
@@ -205,8 +224,14 @@ def build_parser():
     def common(p):
         p.add_argument('--src', default=None, choices=[None, 'auto', 'raw', 'jpg'])
         p.add_argument('--max-side', type=int, default=None, dest='max_side')
+        p.add_argument('--stock', default=None,
+                       help='胶片卷：%s；不指定 = config.STOCK' % '/'.join(stocks.names()))
 
     ap.add_argument('--version', action='version', version='svFilm ' + C.VERSION)
+
+    p = sub.add_parser('stocks', help='列出所有胶片卷')
+    p.add_argument('--stock', default=None)
+    p.set_defaults(func=cmd_stocks)
 
     p = sub.add_parser('probe', help='只分析不写文件')
     p.add_argument('inputs', nargs='+')
@@ -234,6 +259,7 @@ def build_parser():
     p = sub.add_parser('bake', help='把 L2 风格层烘成 .cube')
     p.add_argument('out', help='文件名；给了 --purpose 时只当文件名，落进效果debug 树')
     p.add_argument('--size', type=int, default=33)
+    p.add_argument('--stock', default=None, help='烘哪个卷（不指定 = config 默认风格）')
     p.add_argument('--purpose', default=None, help='三级目录名，给了就走效果debug 规范')
     p.add_argument('--root', default=None, help='效果debug 的上级目录')
     p.add_argument('--date', default=None)

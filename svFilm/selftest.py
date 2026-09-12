@@ -9,7 +9,8 @@ import tempfile
 
 import numpy as np
 
-from . import analyze, color, config as C, guard, io, local, pipeline, style, tone
+from . import (analyze, color, config as C, guard, io, local, pipeline, spatial,
+               stocks, style, tone)
 
 FAIL = []
 
@@ -151,23 +152,92 @@ def t_io_roundtrip():
     os.remove(tmp)
 
 
+def t_stocks():
+    print('[卷 stocks]')
+    for n in stocks.names():
+        s = stocks.TABLE[n]
+        check('卷 %s 有名字/说明/颜色参数' % n,
+              bool(s['label'] and s['desc'] and s['color']))
+    d = _gray_img(gamma=0.8)
+    out, _ = style.apply(d, C, lock_ref=None, stock=stocks.get('neutral'))
+    check('neutral 卷 = 恒等（不风格化）', float(np.max(np.abs(out - d))) < 1e-9,
+          'max %.2e' % float(np.max(np.abs(out - d))))
+    # 每个卷的参数都要能跑通并给出有界结果
+    grid = style.bake_grid(5).reshape(1, -1, 3)
+    for n in stocks.names():
+        o, _ = style.apply(grid, C, lock_ref=None, stock=stocks.get(n))
+        check('卷 %s 可跑通且有界' % n,
+              bool(np.all(np.isfinite(o))) and o.min() >= 0.0 and o.max() <= 1.0)
+    # 卷要真的不一样（否则"卷"就是摆设）
+    a, _ = style.apply(grid, C, lock_ref=None, stock=stocks.get('portra400'))
+    b, _ = style.apply(grid, C, lock_ref=None, stock=stocks.get('ektar100'))
+    check('不同卷确实不同', float(np.max(np.abs(a - b))) > 0.01,
+          'max diff %.4f' % float(np.max(np.abs(a - b))))
+
+
+def t_spatial_off():
+    print('[空间域：默认关 = 恒等]')
+    d = _gray_img(gamma=0.55)
+    out, info = spatial.apply(d, C, stock=None)
+    check('三个都关时不动像素', float(np.max(np.abs(out - d))) < 1e-12)
+    check('info.any=False', not info['any'])
+
+
+def t_spatial_grain():
+    print('[空间域：颗粒]')
+    d = _gray_img(gamma=0.55)
+    p = spatial.resolve(C, stocks.get('portra400'))['grain']
+    g1, i1 = spatial.grain(d, p)
+    g2, _ = spatial.grain(d, p)
+    check('颗粒可复现（固定种子）', float(np.max(np.abs(g1 - g2))) < 1e-12)
+    dm = float(np.percentile(color.gray_of(d), C.PCT_MID))
+    gm = float(np.percentile(color.gray_of(g1), C.PCT_MID))
+    check('颗粒不推走中灰（±0.006）', abs(gm - dm) < 0.006, '%.4f -> %.4f' % (dm, gm))
+    blk = np.zeros((48, 48, 3))
+    gb, _ = spatial.grain(blk, p)
+    check('颗粒不把纯黑提亮（乘性叠加）', float(gb.max()) < 1e-12)
+    check('颗粒输出有界', bool(np.all(np.isfinite(g1))) and g1.min() >= 0 and g1.max() <= 1)
+
+
+def t_spatial_bloom_halation():
+    print('[空间域：黑柔 / Halation 方向性]')
+    d = np.zeros((200, 200, 3))
+    d[80:120, 80:120] = 1.0                      # 黑底上一个白方块
+    p = spatial.resolve(C, stocks.get('cinestill800t'))
+
+    b, _ = spatial.bloom(d, p['bloom'])
+    near = float(b[58:76, 80:120].mean())        # 方块正上方外侧
+    far = float(b[0:10, 0:10].mean())            # 远角
+    check('黑柔只在亮区往外扩散（近处亮、远处不动）', near > 1e-4 and far < 1e-4,
+          'near %.5f far %.7f' % (near, far))
+
+    h, _ = spatial.halation(d, p['halation'])
+    ring = h[58:76, 80:120]
+    r, gg, bb = (float(ring[..., i].mean()) for i in range(3))
+    check('Halation 晕圈偏红橙（R>G>B）', r > gg > bb, '%.4f/%.4f/%.4f' % (r, gg, bb))
+    check('Halation 输出有界', bool(np.all(np.isfinite(h))) and h.min() >= 0 and h.max() <= 1)
+
+
 def t_pipeline_smoke():
     print('[全链 smoke]')
     d = _gray_img(120, 180, gamma=0.4)
     rep = analyze.analyze(_lin_from_disp(d), d, 'jpg')
     lin, ti = tone.correct(_lin_from_disp(d), rep, C)
     d1 = np.clip(color.l2s(lin), 0, 1)
-    d2, si = style.apply(d1, C, lock_ref=style.mid_of(d1))
-    d3, li = local.apply(d1, d2, C)
+    d2, si = style.apply(d1, C, lock_ref=style.mid_of(d1), stock=stocks.get('portra400'))
+    d2b, pi = spatial.apply(d2, C, stock=stocks.get('portra400'))
+    d3, li = local.apply(d1, d2b, C)
     d4, gi = guard.enforce(d3, C)
-    check('各层输出有界', all(x.min() >= 0 and x.max() <= 1 for x in (d1, d2, d3, d4)))
-    check('各层无 NaN', all(np.all(np.isfinite(x)) for x in (d1, d2, d3, d4)))
+    check('各层输出有界', all(x.min() >= 0 and x.max() <= 1 for x in (d1, d2, d2b, d3, d4)))
+    check('各层无 NaN', all(np.all(np.isfinite(x)) for x in (d1, d2, d2b, d3, d4)))
     check('肤色掩膜不炸', 0.0 <= li['skin_cov'] <= 1.0, 'cov=%.4f' % li['skin_cov'])
+    check('空间域 info 齐全', all(k in pi for k in ('grain', 'bloom', 'halation', 'any')))
 
 
 def main():
     for fn in (t_color, t_analyze, t_tone_mid_target, t_tone_monotone, t_style_lock,
-               t_guard, t_lut, t_io_roundtrip, t_pipeline_smoke):
+               t_guard, t_lut, t_io_roundtrip, t_stocks, t_spatial_off,
+               t_spatial_grain, t_spatial_bloom_halation, t_pipeline_smoke):
         fn()
     print('-' * 52)
     if FAIL:

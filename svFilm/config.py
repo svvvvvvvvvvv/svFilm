@@ -5,7 +5,7 @@
 改动前先 git commit。
 """
 
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 
 # ========== 输入 ==========
 MAX_SIDE = 2048                 # 工作分辨率（长边）
@@ -75,6 +75,38 @@ TINT_HI = 0.75                  # 高于此视为亮部
 CHROMA_SCALE = 1.00
 CONTRAST = 1.00                 # 明度对比（只动 L*，1.0 = 不动；>1 是 S 形，中灰不移动）
 CONTRAST_MAX = 1.35             # 上限（超过 0.12 的 S 幅度会失去单调性）
+
+# ========== 卷（stocks.py 是数据表） ==========
+# 选一个卷 = 一次定下"颜色性格 + 空间效果强度"。None = 用上面 L2 的 config 默认（= 轻度风格）。
+# 可选：neutral / portra400 / pro400h / fuji_c200 / ektar100 / cinestill800t / air
+STOCK = None
+
+# ========== 空间域（颗粒 / 黑柔 Bloom / Halation）==========
+# 为什么单独一层：LUT 只能装"颜色 + 影调"，这三个是光学/物理空间效果，塞不进 LUT。
+# 位置：L2 风格之后、L3 局部之前。卷会给各自的强度（见 stocks.py），这里是"不选卷时"的默认。
+GRAIN_ENABLE = False
+GRAIN_AMOUNT = 0.024            # 颗粒强度（乘性，值越大越"糙"）
+GRAIN_SIZE = 1.2                # 颗粒尺度（高斯半径 px，@2048 长边）
+GRAIN_CHROMA = 0.20             # 彩噪占比（0 = 纯单色颗粒；彩噪多会显脏）
+GRAIN_SKIN_SUPPRESS = 0.62      # 肤色区颗粒抑制比例（别把脸磨出麻点）
+GRAIN_DETAIL_SUPPRESS = 0.32    # 高细节区颗粒抑制比例（别叠在纹理上糊成一片）
+GRAIN_DARK_FLOOR = 0.03         # 比这更暗 => 颗粒淡出（暗部本来就脏，再撒就是噪点）
+GRAIN_SEED = 20260912           # 固定种子：同一张图每次结果一致（可复现）
+
+BLOOM_ENABLE = False
+BLOOM_AMOUNT = 0.075            # 辉光强度（亮部外溢的光，线性域加回）
+BLOOM_RADIUS = 22.0             # 扩散半径 px（@2048 长边，越大越"糊"）
+BLOOM_THR_LO = 0.74             # 软阈值下界（显示域灰度，比这低的不发光）
+BLOOM_THR_HI = 0.93             # 软阈值上界
+BLOOM_WARMTH = 0.30             # 辉光偏暖比例（0 = 中性白）
+BLOOM_VEIL = 0.045              # 黑柔特征：整体轻微提灰/降对比（Black Pro Mist 那口气）
+
+HALATION_ENABLE = False
+HALATION_AMOUNT = 0.110         # 晕圈强度（线性域加回）
+HALATION_RADIUS = 18.0          # 晕圈扩散半径 px
+HALATION_THR_LO = 0.78          # 从多亮的高光开始往外散
+HALATION_THR_HI = 0.99
+HALATION_COLOR = [1.000, 0.300, 0.120]   # 红橙（电影卷片基把红光散射回来）
 
 # ========== L3 局部 ==========
 SKIN_PROTECT = True
