@@ -1219,7 +1219,8 @@ def t_l4_caps():
     cap_f = float(C.FACE_CAP_L)
     cap_b = cap_f - float(C.BG_CAP_REL_L)
     soft = float(C.CAP_SOFT_L)
-    src = inspect.getsource(guard.cap_face_bg)
+    src = inspect.getsource(guard.cap_lin_face_bg)
+    prun = inspect.getsource(pipeline.run)
 
     # ① 出厂值与接线
     check('脸上限 = 68（= 鹿井脸 L* 中位 67.9）', abs(cap_f - 68.0) < 1e-9, '%.1f' % cap_f)
@@ -1227,8 +1228,19 @@ def t_l4_caps():
           abs(cap_b - 51.0) < 1e-9, '%.1f' % cap_b)
     check('接线：两个上限都从 config 读（没写死在 guard 里）',
           'FACE_CAP_L' in src and 'BG_CAP_REL_L' in src)
-    check('接线：开关读 CAP_FACE_BG_ENABLE；L4（guard.enforce）真的会走到它',
-          'CAP_FACE_BG_ENABLE' in src and 'cap_face_bg' in inspect.getsource(guard.enforce))
+    check('接线：开关读 CAP_FACE_BG_ENABLE', 'CAP_FACE_BG_ENABLE' in src)
+    # ★ 位置（09-14 SV 选「③」）：必须在 **L1、线性域、`disp1 = l2s(...)` 之前**。
+    #   在 L4 末端压 = 在 L* 域做减法 ⇒ 把背景内部的跨度压扁 ⇒ 「一压背景就变灰」。
+    i_cap = prun.find('cap_lin_face_bg(')
+    i_d1 = prun.find('disp1 = ')
+    check('位置：在 L1 线性域执行（pipeline.run 里 cap_lin_face_bg 排在 disp1=l2s 之前）',
+          i_cap > 0 and i_d1 > i_cap, 'cap@%d < disp1@%d' % (i_cap, i_d1))
+    check('位置：真的传的是 **lin1（线性）**，不是显示域的图',
+          'cap_lin_face_bg(lin1,' in prun)
+    #   ⚠ 只查"真的调用"（带 `guard.` 前缀 + 括号）—— enforce 的 docstring 里提到名字是正常的。
+    _se = inspect.getsource(guard.enforce)
+    check('位置：L4（guard.enforce）**不再**压脸/背景（已挪到 L1）',
+          'guard.cap_lin_face_bg(' not in _se and 'guard.cap_face_bg(' not in _se)
 
     # ② `_soft_cap_L` 的数值行为 —— 这层真正的算法
     L = np.array([20.0, 60.0, 68.0, 74.0, 90.0, 100.0])
@@ -1258,17 +1270,27 @@ def t_l4_caps():
     check('力度 0 ⇒ 一个像素都不动（等于关闸）',
           bool(np.allclose(guard._soft_cap_L(L, cap_f, soft, 0.0), L)))
 
-    # ③ 合成图上真的生效（左半 = 脸·暗端，右半 = 背景·亮端）
+    # ③ 合成图上真的生效（左半 = 脸·暗端，右半 = 背景·亮端）—— **在线性域**
     H, W = 64, 256
     g = np.linspace(0.0, 1.0, W, dtype=np.float32)
-    img = np.stack([np.repeat(g[None, :], H, 0)] * 3, -1)
+    img = np.stack([np.repeat(g[None, :], H, 0)] * 3, -1)      # 显示域 0→1 的灰阶
+    lin = color.s2l(img)
     mf = np.zeros((H, W), np.float32); mf[:, :W // 2] = 1.0
     mb = np.zeros((H, W), np.float32); mb[:, W // 2:] = 1.0
-    out, _ = guard.cap_face_bg(img, C, masks=dict(face_skin=mf, bg=mb))   # 出厂力度 0.5
-    Lb = color.L_of_lin(color.Y_of(color.s2l(np.clip(img, 0, 1))))
-    La = color.L_of_lin(color.Y_of(color.s2l(np.clip(out, 0, 1))))
+    msk = dict(face_skin=mf, bg=mb)
     face_dark = np.zeros((H, W), bool); face_dark[:, :int(W * 0.25)] = True
     bg_hi = np.zeros((H, W), bool); bg_hi[:, int(W * 0.75):] = True
+    Lb = color.L_of_lin(color.Y_of(lin))
+    _La = lambda l: color.L_of_lin(color.Y_of(np.clip(l, 0.0, None)))      # noqa: E731
+
+    out, _ = guard.cap_lin_face_bg(lin, img, C, masks=msk)     # 出厂力度 0.5
+    La = _La(out)
+    r = np.where(lin > 1e-6, out / np.maximum(lin, 1e-6), 1.0)
+    check('合成图·**乘性**：同一像素三个通道倍率一样（只改亮度，不改颜色）',
+          bool(np.allclose(r[..., 0], r[..., 1], atol=1e-6))
+          and bool(np.allclose(r[..., 0], r[..., 2], atol=1e-6)))
+    check('合成图·只往下压（倍率恒 ≤ 1）', float(np.max(r)) <= 1.0 + 1e-6,
+          'max %.6f' % float(np.max(r)))
     check('合成图·脸：本来就暗的**一个像素都没动**（只压不提）',
           bool(np.allclose(La[face_dark], Lb[face_dark], atol=0.05)),
           'Δ 最大 %.4f' % float(np.max(np.abs(La[face_dark] - Lb[face_dark]))))
@@ -1280,8 +1302,8 @@ def t_l4_caps():
     _s0 = float(C.CAP_STRENGTH)
     try:
         C.CAP_STRENGTH = 1.0
-        out1, _ = guard.cap_face_bg(img, C, masks=dict(face_skin=mf, bg=mb))
-        La1 = color.L_of_lin(color.Y_of(color.s2l(np.clip(out1, 0, 1))))
+        out1, _ = guard.cap_lin_face_bg(lin, img, C, masks=msk)
+        La1 = _La(out1)
         check('力度 1.0（全压）⇒ 背景再亮也 ≤ 上限+soft（这时才是真上限）',
               float(np.max(La1[bg_hi])) <= cap_b + soft + 0.5,
               'max %.2f ≤ %.2f' % (float(np.max(La1[bg_hi])), cap_b + soft))
@@ -1292,9 +1314,9 @@ def t_l4_caps():
     finally:
         C.CAP_STRENGTH = _s0
     z = np.zeros((H, W), np.float32)
-    out0, info0 = guard.cap_face_bg(img, C, masks=dict(face_skin=z, bg=z))
+    out0, info0 = guard.cap_lin_face_bg(lin, img, C, masks=dict(face_skin=z, bg=z))
     check('掩膜为空 ⇒ 一个像素都不动（不做任何猜测）',
-          info0.get('applied') is False and bool(np.array_equal(out0, img)))
+          info0.get('applied') is False and bool(np.array_equal(out0, lin)))
 
 
 def main():

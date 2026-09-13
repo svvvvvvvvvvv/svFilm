@@ -125,6 +125,10 @@ def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=Fa
     rep0 = analyze.analyze(s.lin, s.disp, s.kind)                    # L0
     allow = _allow_lift(s, cfg, rep0)
     lin1, t_info = tone.correct(s.lin, rep0, cfg, allow_lift=allow)   # L1
+    # ★ 两道「不许超过」（脸 ≤ 68 / 背景 ≤ 脸−17）—— **在 L1、线性域、转成显示之前**执行。
+    #   SV 09-14 选「③」：放 L4 末端是在 L* 域做**减法** ⇒ 亮的减得多、暗的减得少
+    #   ⇒ 把背景内部的跨度压扁 ⇒ 就是「一压背景就变灰」。线性域是**乘性**的（= 真减曝光）。
+    lin1, cap_info = guard.cap_lin_face_bg(lin1, s.disp, cfg)
     disp1 = np.clip(color.l2s(np.clip(lin1, 0.0, 1.0)), 0.0, 1.0)
     disp1, d_info = denoise.apply(disp1, cfg)                        # 降噪（L1 之后、L2 之前）
 
@@ -168,6 +172,7 @@ def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=Fa
         spatial=sp_info,
         local=l_info,
         face_guard=dict(after_style=fg1, after_spatial=fg2),
+        face_bg_cap=cap_info,
         guard=g_info,
         ms=(time.perf_counter() - t0) * 1000.0,
     )
