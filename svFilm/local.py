@@ -125,28 +125,6 @@ def _region_weight(sel, cfg):
     return np.clip(cv2.GaussianBlur(sel.astype(np.float32), (0, 0), sig), 0.0, 1.0)
 
 
-def _lift_weight(pw, m, edge_px):
-    r"""提亮的**力道权重** = 人物权重 × **到人物轮廓的淡出**（09-14 SV 拍板「中」）。
-
-    为什么需要它（SV 实测：提亮后"在环境中亮度会有点割裂"）：
-      `person_weight` 的淡出是由**分割置信度**定的，而置信度在轮廓上是"啪"地从 1 掉到 0
-      ⇒ `_debug/lab_person_falloff.py` 实测**淡出只有 3~6 px**（画面 1365~2048 宽）= 一刀切。
-    做法：**按几何距离**补一道淡入 —— 轮廓处力道 = 0，往里 `edge_px` 像素涨到满力（smoothstep 收两端）。
-      `edge_px` 由调用方按 `FACE_LIFT_EDGE_REL × 画面短边` 算好传进来（便于单测直接钉死宽度）。
-    ★ **只在人物掩膜内部衰减**（算完再乘 `pw`，而 `pw` 在背景恒为 0）
-      ⇒ 「背景一个像素不碰」这条铁律不破。
-    ⚠ 代价：越宽，人身上**细的地方**（手臂/发丝/肩外沿）提得越少。
-    """
-    import cv2
-    pm = (np.asarray(m['person'], np.float32) > 0.5).astype(np.uint8)
-    if int(pm.sum()) < 16:                     # 掩膜太小/拿不到 ⇒ 不做衰减（别把力道全吃掉）
-        return pw
-    dist = cv2.distanceTransform(pm, cv2.DIST_L2, 5)
-    t = np.clip(dist / max(float(edge_px), 1e-6), 0.0, 1.0)
-    t = t * t * (3.0 - 2.0 * t)                # smoothstep：靠轮廓更平、中段更陡
-    return pw * t
-
-
 def face_tone(disp, cfg=C):
     r"""L3 的「脸」：① **位置**（只提人物，背景零改动）② **形状**（A1 放大已有的立体感）。
 
@@ -161,8 +139,6 @@ def face_tone(disp, cfg=C):
       ① 位置：`补光量 = max(0, 靶 − 脸中位)`，**只提不压**。
          靶 = 鹿井「脸 L*」的 **中位 67.9 ⇒ 取 68**（09-14 SV 拍板「乙」；原来用的是 p25 = 62）。
          脸本来就在靶之上的片子（0791 脸 90.6 / 2328 脸 89.8）⇒ 补光量 = 0 ⇒ 一格不动。
-         ★ 力道**到人物轮廓要淡出去**（09-14 SV 拍板「中」）：见 `_lift_weight` —— 不然人一亮、
-           环境不亮，交界处会"割裂"（实测原来的淡出只有 3~6 px）。
       ② 形状：以**脸自己的中位**为锚，把已有的明暗拉开 `k = 线/现状`（≤2.4 倍），**不编光**。
          线只有一条 = 鹿井「脸内部跨度（框内皮肤 P90−P10）」的 p25 = **35**（`FACE_TGT_SPAN`）。
          ⚠ **光方向（左右差）那条线只量、不参与放大**（`FACE_DIR_MEASURE`，09-14 定）。
@@ -225,11 +201,10 @@ def face_tone(disp, cfg=C):
         return d, info
     Lb = float(np.median(L[sel]))
 
-    # ---- ① 位置：只提不压（★ 力道到人物轮廓要淡出去，见 `_lift_weight`）----
+    # ---- ① 位置：只提不压 ----
     dL = float(np.clip(float(getattr(cfg, 'FACE_TGT_L', 62.0)) - Lb, 0.0,
                        float(getattr(cfg, 'FACE_LIFT_MAX', 40.0))))
-    edge_px = max(2.0, float(getattr(cfg, 'FACE_LIFT_EDGE_REL', 0.045)) * float(min(L.shape)))
-    L1 = (L + _lift_weight(pw, st['masks'], edge_px) * dL) if dL > 1e-3 else L
+    L1 = (L + pw * dL) if dL > 1e-3 else L
 
     # ---- ② 形状：以脸中位为锚拉开已有的明暗（A1：各向同性，只放大已有的，不编光）----
     q10, q90 = np.percentile(L1[sel], [10.0, 90.0])
@@ -253,7 +228,7 @@ def face_tone(disp, cfg=C):
             asym = None                    # 量出来太小 ⇒ 认为"这张脸没方向" ⇒ **拒答**，不报方向
     if dL <= 1e-3 and k <= 1.0 + 1e-9:
         info.update(reason='nothing_to_do', face_L=Lb, span=span, k=k, lift=0.0, how=how,
-                    asym=asym, n_pair=n_pair, dir_how=dir_how, edge_px=float(edge_px))
+                    asym=asym, n_pair=n_pair, dir_how=dir_how)
         return d, info
     Ls = float(np.median(L1[sel]))
     cap = float(getattr(cfg, 'FACE_TOP_CAP', 97.0))
@@ -269,7 +244,6 @@ def face_tone(disp, cfg=C):
         out[wsel] = color.retone_L(lin[wsel], L2[wsel])
     info.update(applied=True, how=how, face_L_before=Lb, face_L=Ls, lift=dL,
                 span=span, k=k, asym=asym, n_pair=n_pair, dir_how=dir_how,
-                edge_px=float(edge_px),
                 person_cov=float(np.mean(pw)), feather_cov=float(np.mean(w)))
     return out, info
 

@@ -1174,32 +1174,6 @@ def t_face_layer():
           and 0.0 < float(C.FACE_DIR_MIN) < float(C.FACE_TGT_LRDIF),
           'min=%.3f line=%.3f' % (C.FACE_DIR_MIN, C.FACE_TGT_LRDIF))
 
-    # ③b ★ 提亮力道「到人物轮廓的淡出」（09-14 SV 拍板「中」）—— 守"提亮后交界处割裂"那一刀
-    check('③ 提亮淡出：出厂宽度 = 画面短边 × 0.045（短边 1365 ⇒ 61 px）',
-          abs(float(C.FACE_LIFT_EDGE_REL) - 0.045) < 1e-9, '%.3f' % C.FACE_LIFT_EDGE_REL)
-    fsrc = inspect.getsource(local.face_tone) + inspect.getsource(local._lift_weight)
-    check('③ 提亮淡出的接线：走"到轮廓的距离场"，宽度从 FACE_LIFT_EDGE_REL 读（没写死）',
-          'distanceTransform' in fsrc and 'FACE_LIFT_EDGE_REL' in fsrc
-          and '_lift_weight(' in inspect.getsource(local.face_tone))
-    # 合成掩膜：40x40 的方块（短边 400），宽度直接给 18 px
-    #   距轮廓 1 px ⇒ 力道 ≈ 0.009 ；9 px ⇒ t=0.5 处 smoothstep 中点 = 0.5 ；18 px ⇒ 满
-    pm = np.zeros((400, 400), np.float32)
-    pm[100:300, 150:250] = 1.0
-    lw = local._lift_weight(pm.copy(), dict(person=pm), 18.0)
-    check('③ 淡出：轮廓那一圈力道 ≈ 0（不是一刀切）',
-          float(lw[100, 200]) < 0.05 and float(lw[299, 200]) < 0.05,
-          '上缘 %.3f 下缘 %.3f' % (lw[100, 200], lw[299, 200]))
-    check('③ 淡出：往里 9 px 力道 ≈ 一半（smoothstep 中点）',
-          abs(float(lw[108, 200]) - 0.5) < 0.06, '%.3f' % lw[108, 200])
-    check('③ 淡出：往里 ≥18 px 力道满（人身上不受影响）',
-          float(lw[117, 200]) > 0.97 and float(lw[200, 200]) > 0.99,
-          '%.3f / %.3f' % (lw[117, 200], lw[200, 200]))
-    check('③ 淡出：背景仍是 0（「背景一个像素不碰」这条不破）',
-          float(lw[:, :150].max()) == 0.0 and float(lw[:, 250:].max()) == 0.0)
-    check('③ 淡出：掩膜太小/拿不到 ⇒ 原样返回（不把力道全吃掉）',
-          local._lift_weight(np.ones((4, 4), np.float32), dict(person=np.zeros((4, 4), np.float32)),
-                             18.0).shape == (4, 4))
-
     # ④ 光方向量测：合成脸，只改左右亮度 ⇒ 符号必须跟着走（这层真正的算法）
     H = W = 400
     gys, gxs = np.indices((H, W))
