@@ -53,7 +53,9 @@ class Result:
             self.sample.name, self.sample.kind, analyze.summarize(a), etag, btag,
             stocks.label_of((r.get('style') or {}).get('stock')),
             ('开' if (r.get('denoise') or {}).get('applied') else '关'),
-            ('ev%+.2f' % r['tone']['ev_mid']) if r['tone']['applied'] else '未触发',
+            ('ev%+.2f%s' % (r['tone']['ev_mid'],
+                            '(有界兜底)' if r['tone'].get('dark') else ''))
+            if r['tone']['applied'] else '未触发',
             ('+'.join(tag) if tag else '无'),
             ('/'.join(r['guard']['actions']) if r['guard']['actions'] else '无'),
             r['ms']))
@@ -76,16 +78,28 @@ def _entry_bias(sample):
     return None if v is None else float(v)
 
 
-def _allow_lift(sample, cfg):
-    """入口补过基线曝光 ⇒ 曝光层不再提亮；补不了（非富士/读不到 tag）才退回兜底。"""
+def _allow_lift(sample, cfg, rep=None):
+    """能不能让曝光层（L1）兜底提亮。
+
+    三条，按顺序：
+      1) JPG / 关掉 RAW 提亮 ——> 不许（JPG 提亮 = 把被压过的颜色按斜率放大）。
+      2) 入口**没补过**基线曝光（非富士 / 读不到 tag）——> 老兜底，允许。
+      3) 入口**补过** ——> 09-13 SV 拍板「乙」第 2 步起**不再一刀切**。
+         入口换成「零点 + 固定成形」后，成形是固定的 ⇒ **场景本身暗**的图会被忠实压在很低的地方
+         （实测 DSCF0547 成片 L*50 只有 17.4，大师·高反差带下沿是 33）。那是**曝光**问题，
+         该由曝光层**有界地**补回来。判据 = `analyze` 报的 `dark_lift`（中间调低于带下沿）；
+         不满足就照旧不许提 —— 这样"亮场/大反差"那批**逐位不变**。
+    """
     if sample.kind != 'raw':
         return bool(cfg.ALLOW_LIFT_JPG)
     if not cfg.ALLOW_LIFT_RAW:
         return False
     b = _entry_bias(sample)
-    if cfg.AUTO_LIFT_ONLY_WHEN_NO_ENTRY_BIAS and b is not None and abs(b) > 1e-6:
-        return False
-    return True
+    if b is None or abs(b) <= 1e-6:
+        return True
+    if not cfg.AUTO_LIFT_ONLY_WHEN_NO_ENTRY_BIAS:
+        return True
+    return bool(rep is not None and rep.get('dark_lift'))
 
 
 def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=False,
@@ -95,7 +109,7 @@ def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=Fa
     s = io.load(path, max_side or cfg.MAX_SIDE, src=src)
 
     rep0 = analyze.analyze(s.lin, s.disp, s.kind)                    # L0
-    allow = _allow_lift(s, cfg)
+    allow = _allow_lift(s, cfg, rep0)
     lin1, t_info = tone.correct(s.lin, rep0, cfg, allow_lift=allow)   # L1
     disp1 = np.clip(color.l2s(np.clip(lin1, 0.0, 1.0)), 0.0, 1.0)
     disp1, d_info = denoise.apply(disp1, cfg)                        # 降噪（L1 之后、L2 之前）
@@ -114,6 +128,7 @@ def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=Fa
         entry_bias_ev=_entry_bias(s),
         fuji_dr=(s.cam or {}).get('fuji_dr'),
         allow_lift=allow,
+        dark_lift=bool(rep0.get('dark_lift')),
         stock=(st or {}).get('name'),
         stock_label=stocks.label_of((st or {}).get('name')),
         base=stocks.resolve_base(cfg, base)['name'],

@@ -48,9 +48,19 @@ def analyze(lin, disp, kind='raw'):
     else:
         decision = 'hold'
 
+    # ★ 有界兜底提亮（09-13 SV 拍板「乙」第 2 步）—— 这里只**测量 + 判阈值**，动不动手由
+    #   `pipeline._allow_lift` / `tone.build_curve` 决定。单位用 L*（与大师带的尺子一致），
+    #   比 `decision` 的显示域中灰更贴"这张片子本身是不是太暗"。
+    #   判据线 `LIFT_DARK_GATE_L` 比落点 `LIFT_DARK_FLOOR_L` 再低一点，只碰明显太黑的。
+    l50 = float(L_p[C.PCT_MID])
+    dark_lift = bool(getattr(C, 'LIFT_DARK_ENABLE', False)
+                     and l50 < float(getattr(C, 'LIFT_DARK_GATE_L', 0.0)))
+
     return {
         'kind': kind,
         'decision': decision,
+        'l50': l50,
+        'dark_lift': dark_lift,
         'gray_pcts': gray_p,        # 显示域灰度 0~1
         'gray255': {k: v * 255.0 for k, v in gray_p.items()},
         'L_pcts': L_p,

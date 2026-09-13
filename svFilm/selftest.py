@@ -757,6 +757,46 @@ def t_entry_bias():
     check('入口没这项(非富士) -> 允许兜底提亮',
           pipeline._allow_lift(_Sample('raw', {}), C) is True)
     check('JPG 一律不提亮', pipeline._allow_lift(_Sample('jpg'), C) is False)
+
+    print('[★ 有界兜底提亮（乙）：只补"太黑的"，不碰其余]')
+    check('入口补过 + 整张偏低 -> 允许（有界）提亮',
+          pipeline._allow_lift(like, C, {'decision': 'below', 'dark_lift': True}) is True)
+    check('入口补过 + 不算低 -> 仍不提亮（亮场/大反差那批逐位不变）',
+          pipeline._allow_lift(like, C, {'decision': 'below', 'dark_lift': False}) is False)
+    # L0 的判据：L*50 低于「大师·高反差带下沿」才算"太黑"
+    d_dk = _gray_img(gamma=2.6)                      # 很暗 -> dark_lift
+    rep_dk = analyze.analyze(_lin_from_disp(d_dk), d_dk, 'raw')
+    check('很暗的图 -> dark_lift', rep_dk['dark_lift'] is True, 'L*50 %.1f' % rep_dk['l50'])
+    d_ok = _gray_img(gamma=0.7)                      # 正常亮 -> 不动它
+    rep_ok = analyze.analyze(_lin_from_disp(d_ok), d_ok, 'raw')
+    check('正常的图 -> 不 dark_lift', rep_ok['dark_lift'] is False, 'L*50 %.1f' % rep_ok['l50'])
+    # 落点 = 带下沿，且有上限（不是拽到大师中位）
+    # ⚠ 用 gamma=2.1（L*50≈25，只欠 ~0.8 档）→ **不会**撞上限，才量得到"落点"；
+    #   gamma=2.6 那种极暗图会撞上限，落点是"上限处"而不是带下沿。
+    d_dk = _gray_img(gamma=2.1)
+    rep_dk = analyze.analyze(_lin_from_disp(d_dk), d_dk, 'raw')
+    out_dk, info_dk = tone.correct(_lin_from_disp(d_dk), rep_dk, C, allow_lift=True)
+    check('有界兜底确实动手', info_dk['applied'] and info_dk['dark'], 'ev%+.2f' % info_dk['ev_mid'])
+    check('★ 落点 = 大师带下沿（不是拽到中位 TGT_MID）',
+          abs(np.log2(info_dk['target_mid_lin']
+                      / float(color.lin_of_L(C.LIFT_DARK_FLOOR_L)))) < 1e-6,
+          'in %.4f vs 带下沿 %.4f（TGT_MID 会是 %.4f）'
+          % (info_dk['target_mid_lin'], float(color.lin_of_L(C.LIFT_DARK_FLOOR_L)),
+             float(color.s2l(C.TGT_MID))))
+    check('★ 有界兜底后中间调抬到带下沿附近',
+          abs(info_dk['y_out'][2] - float(color.lin_of_L(C.LIFT_DARK_FLOOR_L))) < 1e-9,
+          'L*%.1f' % float(color.L_of_lin(info_dk['y_out'][2])))
+    check('有界兜底后白点仍守 TGT_WHITE',
+          abs(float(np.percentile(color.gray_of(np.clip(color.l2s(out_dk), 0, 1)), C.PCT_WHITE))
+              - C.TGT_WHITE) < 0.03)
+    # 极暗图 -> 撞上限（"设上限防冲过头"）
+    d_x = _gray_img(gamma=2.6)
+    rep_x = analyze.analyze(_lin_from_disp(d_x), d_x, 'raw')
+    _, info_x = tone.correct(_lin_from_disp(d_x), rep_x, C, allow_lift=True)
+    check('★ 提亮有上限（极暗图 ≤ LIFT_DARK_CAP_EV 档）',
+          info_x['ev_mid'] <= C.LIFT_DARK_CAP_EV + 1e-6 and info_x['capped'],
+          'ev%+.2f vs 上限 %.2f' % (info_x['ev_mid'], C.LIFT_DARK_CAP_EV))
+
     # 端到端：同一张偏暗图，allow_lift False 时像素不动
     d = _gray_img(gamma=0.9)
     lin0 = _lin_from_disp(d)

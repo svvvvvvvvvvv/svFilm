@@ -50,14 +50,22 @@ def build_curve(rep, cfg=C, allow_lift=False):
 
     # ---- 绝对靶：显示域 -> lin 域 ----
     Tb = float(color.s2l(cfg.TGT_BLACK))
-    # 中灰落点分两种（09-13「折中」档）：
+    # 中灰落点分三种：
     #   compress（真的亮得离谱）-> 落到**过亮护栏线** GUARD_MID：只把"离谱的那一截"收回来，
     #                             不再拽到中灰 TGT_MID（那会把正常的亮片压闷）。
-    #   其余（below 的兜底提亮）-> 落到 TGT_MID（大师中位的那个灰）。
+    #   dark（★ 有界兜底提亮，09-13 SV 拍板「乙」第 2 步）：靶 = **大师·高反差带的 L*50 下沿**。
+    #       为什么不是 TGT_MID：TGT_MID 是**大师中位**，拽过去就是 09-13 园岭那个老病
+    #       （每张都被拽到同一个中间灰）；而且实测把上限放开后会连高光一起压（L95 掉、亮点塌）。
+    #       "只补进带、不追中位"既够用又天然有界。
+    #   其余（below 的老兜底：入口没补过基线曝光的源）-> 落到 TGT_MID，行为不变。
+    dark = bool(rep.get('dark_lift')) and bool(allow_lift)
     if rep.get('decision') == 'compress':
         Tm = float(color.s2l(getattr(cfg, 'GUARD_MID', cfg.TGT_MID)))
         # 白点的上限也走"过曝专属"那一档，见下面 tw_out 的注释（09-13 SV 拍板「开顶」）。
         Tw = float(color.s2l(getattr(cfg, 'WHITE_CEIL', cfg.TGT_WHITE)))
+    elif dark:
+        Tm = float(color.lin_of_L(float(getattr(cfg, 'LIFT_DARK_FLOOR_L', 33.0))))
+        Tw = float(color.s2l(cfg.TGT_WHITE))
     else:
         Tm = float(color.s2l(cfg.TGT_MID))
         Tw = float(color.s2l(cfg.TGT_WHITE))
@@ -68,7 +76,10 @@ def build_curve(rep, cfg=C, allow_lift=False):
     # ---- 中灰增益：一个量，双向限幅 ----
     g_raw = Tm / max(ym, cfg.NOISE_FLOOR)
     if g_raw >= 1.0:                                   # 方向：提亮
-        g = min(g_raw, 2.0 ** cfg.EV_CAP_UP) if allow_lift else 1.0
+        cap = float(cfg.EV_CAP_UP)
+        if dark:                                       # 有界兜底提亮：上限收紧，防"图极暗时冲过头"
+            cap = min(cap, float(getattr(cfg, 'LIFT_DARK_CAP_EV', cap)))
+        g = min(g_raw, 2.0 ** cap) if allow_lift else 1.0
     else:                                              # 方向：压暗
         g = max(g_raw, 2.0 ** -cfg.EV_CAP_DOWN)
     Tm_eff = ym * g
@@ -106,7 +117,7 @@ def build_curve(rep, cfg=C, allow_lift=False):
 
     curve = ToneCurve(t_in, t_out)
     info = dict(
-        applied=True, capped=capped,
+        applied=True, capped=capped, dark=dark,
         allow_lift=bool(allow_lift), gain_mid=float(g), gain_wanted=float(g_raw),
         target_mid_lin=Tm_eff, target_white_lin=Tw,
         ev_mid=float(np.log2(curve.gain(max(ym, C.NOISE_FLOOR)))),
@@ -147,8 +158,10 @@ def correct(lin, rep, cfg=C, allow_lift=None):
 
     动不动手，由"方向 + 源的提亮许可"两件事一起决定：
       hold     -> 没超出上限护栏，不动
-      below    -> 偏暗。**入口补过基线曝光就不再提亮**（否则等于把补好的又拽回去）；
-                  只有入口补不了（非富士 / 读不到 tag）时才退回让这里兜底
+      below    -> 偏暗。**入口补过基线曝光的不再一律不亮**（09-13 SV 拍板「乙」第 2 步）：
+                  判据改看这张图自己 —— 中间调低于「大师·高反差带下沿」L*33 时才允许
+                  **有界**提亮（落点 = 带下沿，上限 LIFT_DARK_CAP_EV 档）；
+                  入口补不了（非富士 / 读不到 tag）的老兜底照旧。
       compress -> 偏亮，压回来（这就是"救过曝"）
 
     ⚠ 这里的中灰只当**上限护栏**，不是"提亮靶"。拿整图中位数当靶会把每张图都拽到
@@ -162,6 +175,7 @@ def correct(lin, rep, cfg=C, allow_lift=None):
 
     if dec == 'hold' or (dec == 'below' and not allow):
         return lin.copy(), dict(applied=False, reason=dec, ev_mid=0.0, capped=False,
+                                dark=False,
                                 allow_lift=allow, gain_mid=1.0, gain_wanted=1.0,
                                 target_mid_lin=float(color.s2l(cfg.TGT_MID)),
                                 target_white_lin=float(color.s2l(cfg.TGT_WHITE)),
