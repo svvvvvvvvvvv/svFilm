@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
-"""L3 —— 局部层。默认做两件事，都只碰色度（不改明度）：
-
+r"""L3 —— 局部层。三件事，顺序 = **色度 → 位置 → 形状**：
   ① 肤色保护 —— 风格层会把颜色往胶片方向收，肤色最容易被收坏。
      拿 L1 修正完的成片当参考，哪里是肤色、就把那里的色度按比例还给参考值。
      明度用当前的，色度用参考的 —— 只还"色"，不还"亮"。
@@ -12,12 +11,18 @@
      就完全不碰 —— 挡粉衣服/木色被顺手推暖）；过亮门**逐像素**收力
      （L* ≤ 73.3 全强度 / ≥ 83.7 不补，逆光高调脸的高光部分自己不补、暗部照补）。
 
+  ③ ★ **脸**（`face_tone`，09-13 深夜 SV 拍板；出厂 `FACE_ENABLE=False` ⇒ 逐位不变）——
+     **位置**（这张脸该多亮）+ **形状**（这张脸有多立体）。这两件事要的是"人在哪、脸在哪"，
+     只能靠分割 + 五官点拿（`face.py`），**不是** ①② 用的那个颜色软掩膜。详见 `face_tone` 的 docstring。
+     ⚠ 排在最末：它的锚点（脸中位）必须在①②和影调曲线都定完之后才取。
+
 （真正的大局：局部后面还会长柔化/颗粒/黑柔，那是空间域的活，
   用独立一层做，不塞进颜色层。）
 """
 import numpy as np
 
 from . import color
+from . import face
 from . import config as C
 
 
@@ -104,6 +109,84 @@ def skin_floor(disp, cfg=C):
     return out, info
 
 
+def face_tone(disp, cfg=C):
+    r"""L3 的「脸」：① **位置**（只提人物，背景零改动）② **形状**（A1 放大已有的立体感）。
+
+    为什么排在这一层、这个位置：
+      * 影调曲线（L2）和黑柔都在压脸 ⇒ 这一层排在它们**后面**，量到的才是"最终要交出去的那张脸"。
+      * 排在肤色那两件事**之后**：那两件事的过亮门读的是当前 L\*，先动明度会把它们的判据改掉。
+        ⇒ 层内顺序 = **色度 → 位置 → 形状**。
+      * ★ **只碰明度**（`color.retone_L` 同步缩放 RGB，色相/彩度关系不动）。
+      * ★ 两个动作都只在**人物权重**上做，而该权重在**背景掩膜里恒为 0** ⇒ 背景一个像素不碰。
+
+    两句规则（09-13 深夜 SV 定）：
+      ① 位置：`补光量 = max(0, 靶 − 脸中位)`，**只提不压**。靶 = 鹿井「脸 L*」的 **p25 = 62**（下沿，不是中位）。
+         脸本来就在靶之上的片子（0791 脸 90.6 / 2328 脸 89.8）⇒ 补光量 = 0 ⇒ 一格不动。
+      ② 形状：以**脸自己的中位**为锚，把已有的明暗拉开 `k = 线/现状`（≤2.4 倍），**不编光**；
+         线 = 鹿井「脸内部跨度（框内皮肤 P90−P10）」的 p25 = 35。变亮那部分最多到 L\*97（不动暗部）。
+      ⚠ **顺序不可换**：形状的锚点（脸中位）必须在**位置定好之后**才取，否则锚点是错的。
+    """
+    d = np.clip(disp, 0.0, 1.0)
+    info = dict(applied=False)
+    if not getattr(cfg, 'FACE_ENABLE', False):
+        info['reason'] = 'off'
+        return d, info
+    try:
+        st = face.parse(d)
+    except face.FaceUnavailable as e:                      # 缺依赖/缺模型 ⇒ 优雅降级
+        info.update(reason='no_dep', err=str(e))
+        return d, info
+    f = st['face']
+    if f is None:
+        info['reason'] = 'no_face'
+        return d, info
+    pw = st['person_weight']
+    if pw is None or float(np.max(pw)) < 1e-3:
+        info['reason'] = 'no_person'
+        return d, info
+
+    lin = color.s2l(d)
+    L = color.L_of_lin(color.Y_of(lin))
+    x0, y0, x1, y1 = f['box']
+    boxm = np.zeros(L.shape, bool)
+    boxm[y0:y1, x0:x1] = True
+    sel = boxm & (st['masks']['skin'] > 0.5)
+    if int(sel.sum()) < int(getattr(cfg, 'FACE_MIN_SKIN_PX', 200)):
+        sel = boxm
+    Lb = float(np.median(L[sel]))
+
+    # ---- ① 位置：只提不压 ----
+    dL = float(np.clip(float(getattr(cfg, 'FACE_TGT_L', 62.0)) - Lb, 0.0,
+                       float(getattr(cfg, 'FACE_LIFT_MAX', 40.0))))
+    L1 = (L + pw * dL) if dL > 1e-3 else L
+
+    # ---- ② 形状：以脸中位为锚拉开已有的明暗 ----
+    q10, q90 = np.percentile(L1[sel], [10.0, 90.0])
+    span = float(q90 - q10)
+    k = float(np.clip(float(getattr(cfg, 'FACE_TGT_SPAN', 35.0)) / max(span, 1e-6),
+                      1.0, float(getattr(cfg, 'FACE_SPAN_KMAX', 2.4))))
+    if dL <= 1e-3 and k <= 1.0 + 1e-9:
+        info.update(reason='nothing_to_do', face_L=Lb, span=span, k=k, lift=0.0)
+        return d, info
+    Ls = float(np.median(L1[sel]))
+    cap = float(getattr(cfg, 'FACE_TOP_CAP', 97.0))
+    Lx = Ls + k * (L1 - Ls)
+    Lx = np.where(Lx > L1, np.minimum(Lx, np.maximum(L1, cap)), Lx)
+    w = f['weight']
+    L2 = L1 + w * (Lx - L1)
+    # ★ 只在有人物权重的像素上重调亮度 ⇒ 权重恒 0 的地方（**整个背景**）原样搬过来，
+    #   连浮点残差都不留（否则 retone_L 会把"权重 0"的像素挪动 ~0.02 L*，肉眼不可见但不再是"一个像素不碰"）。
+    #   门用 `pw`（人物权重）而不是 `w`：位置那一下是在 `pw` 上做的，`w ⊆ pw > 0`，用 pw 才不会漏掉位置。
+    out = d.copy()
+    wsel = pw > 1.0e-6
+    if np.any(wsel):
+        out[wsel] = color.retone_L(lin[wsel], L2[wsel])
+    info.update(applied=True, face_L_before=Lb, face_L=Ls, lift=dL,
+                span=span, k=k, person_cov=float(np.mean(pw)),
+                feather_cov=float(np.mean(f['weight'])))
+    return out, info
+
+
 def apply(ref_disp, disp, cfg=C):
     """ref_disp = L1 修正后的成片；disp = 当前（过完风格 + 空间域）的成片。"""
     out = np.clip(disp, 0.0, 1.0)
@@ -116,4 +199,7 @@ def apply(ref_disp, disp, cfg=C):
     if getattr(cfg, 'SKIN_FLOOR', False):
         out, finfo = skin_floor(out, cfg)
         info['skin_floor'] = finfo
+    if getattr(cfg, 'FACE_ENABLE', False):          # ★ 色度做完才动明度（见 face_tone 的注释）
+        out, tinfo = face_tone(out, cfg)
+        info['face_tone'] = tinfo
     return out, info

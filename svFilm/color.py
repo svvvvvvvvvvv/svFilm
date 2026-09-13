@@ -113,6 +113,19 @@ def lin_of_L(L):
     return f_lab_inv((np.asarray(L, np.float64) + 16.0) / 116.0)
 
 
+def retone_L(lin, L_new):
+    """★ **只改明度**：把线性图按"新的 L* 映射"重打一遍。
+
+    做法 = 每个像素按 `Y_new / Y_old` **同步缩放 RGB** ⇒ 色相完全不动、
+    彩度关系也不动（这正是"只动亮暗、不动颜色"该有的形态；换 Lab 改 L* 会顺带改彩度）。
+    `L_new` 与 `lin` 同形（或标量）。返回 disp 域。
+    """
+    lin = np.asarray(lin, np.float64)
+    Y = np.maximum(Y_of(lin), _EPS)
+    k = lin_of_L(np.clip(L_new, 0.0, 100.0)) / Y
+    return np.clip(l2s(lin * k[..., None]), 0.0, 1.0)
+
+
 def chroma(lab):
     return np.sqrt(lab[..., 1] ** 2 + lab[..., 2] ** 2)
 
