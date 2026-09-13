@@ -1056,13 +1056,108 @@ def t_entry_settle():
           and 'cameras.entry_settle_level(' in _src)
 
 
+def _entry_analytic(cfg, img, ev, a):
+    """入口形状的解析式（**不含趾部**）—— 用来给趾部测试当"参照臂"。
+
+    ⚠ 必须与 `io.entry_tone` 里的算式逐字一致；只用来算"没有趾部时该是多少"。
+    """
+    g = float(getattr(cfg, 'ENTRY_GAMMA', 1.0))
+    knee = float(getattr(cfg, 'ENTRY_KNEE', 1.0))
+    ceil = float(getattr(cfg, 'ENTRY_CEIL', 1.0))
+    Y = np.maximum(color.luma(np.clip(img, 0.0, None)), 1e-9)
+    y = np.power(np.maximum(Y * (2.0 ** float(ev)), 1e-9), g) * float(a)
+    d = max(ceil - knee, 1e-6)
+    return np.where(y > knee, knee + d * (1.0 - np.exp(-(y - knee) / d)), y), Y
+
+
+def t_entry_toe():
+    """入口趾部（v0.3.8，09-13 深夜 SV 拍板「对齐鹿井」）。
+
+    不变量：
+      ① **可回退**：`ENTRY_TOE=1.0` 必须逐位等于"没有趾部"的解析式；
+      ② **只动低位**：出口亮度 y > `中位×ENTRY_TOE_HI_REL` 的那一段逐位不变；
+      ③ **★ 内容归一**：锚点是"图自己的出口亮度中位" ⇒ **亮图和暗图都只在各自最低的一小段咬**，
+         两张图各自的**中位像素必须逐位不变**（这一条是绝对断点版本栽过的地方：
+         固定断点在暗片上会让整张图掉进趾部，实测 0071 中灰 28.8 → 16.5）；
+      ④ **方向单调**：floor 越小 ⇒ 暗部越暗；且整体仍**单调不减**（不许倒挂）；
+      ⑤ 纯黑仍是纯黑（Y=0 → 0）。
+    """
+    print('[入口趾部：只压自己最低那一小段，中灰以上逐位不动]')
+    EV, A = 2.184, 1.449                      # 0791 的实测零点/落点（定档用的真实参数）
+    cfg = _Cfg(ENTRY_TOE=float(C.ENTRY_TOE))
+    lo_rel, hi_rel = float(C.ENTRY_TOE_LO_REL), float(C.ENTRY_TOE_HI_REL)
+    ramp = np.linspace(0.0, 0.6, 256)[None, :, None].repeat(3, axis=2)
+    dark_ramp = ramp * 0.15                   # 同一形状的"暗图"（内容归一要能扛住它）
+
+    y0, Y = _entry_analytic(C, ramp, EV, A)
+    want_none = ramp * (y0 / Y)[..., np.newaxis]
+    ym = float(np.median(y0))
+    hi, lo = hi_rel * ym, lo_rel * ym
+    up = y0 > hi
+    act = (y0 > 0.0) & (y0 < hi)
+    mid_i = int(np.argmin(np.abs(y0.reshape(-1) - ym)))
+
+    off = io.entry_tone(ramp, EV, _Cfg(ENTRY_TOE=1.0), level=A)
+    on = io.entry_tone(ramp, EV, cfg, level=A)
+    deep = io.entry_tone(ramp, EV, _Cfg(ENTRY_TOE=0.20), level=A)
+    L_off = color.L_of_lin(color.luma(off))
+    L_none = color.L_of_lin(color.luma(want_none))
+    L_on = color.L_of_lin(color.luma(on))
+    L_deep = color.L_of_lin(color.luma(deep))
+
+    check('趾部可回退：ENTRY_TOE=1.0 逐位等于"无趾部"解析值',
+          float(np.max(np.abs(off - want_none))) < 1e-15,
+          'max err %.2e' % float(np.max(np.abs(off - want_none))))
+    check('趾部只动低位：出口 y > 中位×HI_REL 的像素逐位不变',
+          up.any() and float(np.max(np.abs(on[up] - off[up]))) < 1e-15,
+          '%d/%d 个像素在断点之上（断点 y=%.4f，中位 y=%.4f）' % (int(up.sum()), up.size, hi, ym))
+    check('趾部在低位真的压深（不是接了没通）',
+          act.any() and float(np.max(L_none[act] - L_on[act])) > 3.0,
+          '最大压深 %.2f L*（%d 个像素在趾部区间）'
+          % (float(np.max(L_none[act] - L_on[act])), int(act.sum())))
+    check('★ 内容归一：图自己的中位像素逐位不变（亮图）',
+          float(np.max(np.abs(on.reshape(-1, 3)[mid_i] - off.reshape(-1, 3)[mid_i]))) < 1e-15,
+          '中位 y=%.4f，断点 y=%.4f ⇒ 中位在断点之上' % (ym, hi))
+    yd, Yd = _entry_analytic(C, dark_ramp, EV, A)
+    ymd = float(np.median(yd))
+    mid_id = int(np.argmin(np.abs(yd.reshape(-1) - ymd)))
+    off_d = io.entry_tone(dark_ramp, EV, _Cfg(ENTRY_TOE=1.0), level=A)
+    on_d = io.entry_tone(dark_ramp, EV, cfg, level=A)
+    check('★ 内容归一：暗图自己的中位像素也逐位不变（绝对断点版本在这里会整图变暗）',
+          float(np.max(np.abs(on_d.reshape(-1, 3)[mid_id]
+                              - off_d.reshape(-1, 3)[mid_id]))) < 1e-15,
+          '暗图中位 y=%.4f，断点 y=%.4f' % (ymd, hi_rel * ymd))
+    want_d = dark_ramp * (yd / Yd)[..., np.newaxis]
+    bite_d = float(np.max(color.L_of_lin(color.luma(want_d))[yd < hi_rel * ymd]
+                          - color.L_of_lin(color.luma(on_d))[yd < hi_rel * ymd]))
+    check('★ 内容归一：暗图仍有趾部（没被"相对锚点"变成空操作）', bite_d > 3.0,
+          '暗图最大压深 %.2f L*' % bite_d)
+    check('趾部方向单调：floor 越小 ⇒ 暗部越暗',
+          float(np.max(L_on - L_deep)) > 0.5 and float(np.max(L_deep - L_off)) < 1e-9,
+          '0.32 vs 0.20 最大差 %.2f L*' % float(np.max(L_on - L_deep)))
+    check('趾部不破坏单调（曲线仍非降）',
+          bool(np.all(np.diff(L_on.reshape(-1)) >= -1e-12))
+          and bool(np.all(np.diff(L_deep.reshape(-1)) >= -1e-12)))
+    check('趾部不动纯黑（Y=0 仍为 0，没把最暗处抬起来）',
+          float(color.luma(on)[0, 0]) < 1e-12 and float(color.luma(deep)[0, 0]) < 1e-12)
+    # 出厂默认守卫：别把它悄悄关掉
+    check('出厂默认：趾部开着，且 0 < LO_REL < HI_REL < 1（中位永远在断点之上）',
+          0.0 < float(C.ENTRY_TOE) < 1.0 and 0.0 < lo_rel < hi_rel < 1.0,
+          'TOE=%.2f  LO_REL=%.2f  HI_REL=%.2f' % (C.ENTRY_TOE, lo_rel, hi_rel))
+    # 接线守卫：装配点必须真的把 cfg 传进 entry_tone（别在别处又写死一份形状）
+    _src = open(io.__file__, encoding='utf-8').read()
+    check('趾部接线：entry_tone 里读的是 ENTRY_TOE / ENTRY_TOE_HI_REL（没有写死的 magic number）',
+          "getattr(cfg, 'ENTRY_TOE', 1.0)" in _src
+          and "getattr(cfg, 'ENTRY_TOE_HI_REL', 0.84)" in _src)
+
+
 def main():
     for fn in (t_color, t_analyze, t_tone_mid_target, t_tone_monotone, t_style_lock,
                t_style_contrast_direction, t_style_tone_curve, t_style_chroma_ends, t_denoise,
                t_guard, t_lut,
                t_io_roundtrip, t_stocks, t_spatial_off, t_spatial_grain,
                t_spatial_bloom_halation, t_local_skin_floor, t_entry_bias, t_pipeline_smoke,
-               t_review_fixes, t_entry_settle):
+               t_review_fixes, t_entry_settle, t_entry_toe):
         fn()
     print('-' * 52)
     if FAIL:

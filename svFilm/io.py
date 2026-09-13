@@ -150,18 +150,27 @@ def scene_exposure_index(lin):
 
 
 def entry_tone(lin, ev, cfg=C, level=None):
-    """入口成形（09-13 SV 拍板「乙」）：**场景线性光 + 一条固定的亮度/反差/肩部曲线**。
+    """入口成形（09-13 SV 拍板「乙」）：**场景线性光 + 一条固定的亮度/反差/肩部/趾部曲线**。
 
     与 `apply_entry_curve` 的分工：
       * 旧：按 机型×DR 实测的「RAW → 机内 JPEG」逐亮度增益 —— **把相机的机内风格一起搬进来**
         （实测把动态范围压掉 ~2.5 倍、2328 有 13% 像素被顶穿 1.0 ⇒ 高光砸成平板）。
       * 新：只做两件与口味无关的事 ——
           ① 零点：`× 2^ev`（ev = 实测 mid_ev，只补"相机故意欠曝"那几档）⇒ 近似**场景线性光**；
-          ② 形状：`y' = a · y^ENTRY_GAMMA` + **软肩部**（超过 ENTRY_KNEE 平滑压向 ENTRY_CEIL）。
+          ② 形状：`y' = a · y^ENTRY_GAMMA` + **软肩部**（超过 ENTRY_KNEE 平滑压向 ENTRY_CEIL）
+             + **趾部**（`ENTRY_TOE`：y 低于"出口亮度中位 × ENTRY_TOE_HI_REL"那一段收下来，
+               越低收得越多，中灰以上**逐位不动**）。
 
     落点 `a`：默认 = 全局 `cfg.ENTRY_LEVEL`；**`level` 传了就用它** ——
     「位置逐张听相机」（`cameras.entry_settle_level`）走的就是这条路，
     把"全库一个落点"换成"逐张查机型×DR 实测规律"（见 cameras.py `SETTLE_LAW`）。
+
+    **趾部（v0.3.8，09-13 深夜 SV 拍板「对齐鹿井」）**：上面的形状原来**只有肩部没有趾部**
+    ⇒ `Y^0.886 · a` 在 Y→0 时增益无上限，实测把黑位放大 ×12（相机给的 L\\*3.0 → 出口 L\\*21.8），
+    而中灰/高光本来是准的 ⇒ 整片"发灰发奶"。
+    趾部只压 **自己最低那一小段**：断点 = `出口亮度 y 的中位 × ENTRY_TOE_LO/HI_REL`（**内容归一**，
+    不是绝对亮度 —— 绝对断点在暗片上会让整张图都掉进趾部，见 config 注释）。
+    `ENTRY_TOE = 1.0` = 关掉（逐位等于改之前）。
 
     仍然**只动亮度、不改色相**（三通道乘同一个"亮度→增益"，与 `apply_entry_curve` 同契约）。
     """
@@ -173,6 +182,20 @@ def entry_tone(lin, ev, cfg=C, level=None):
     y = np.power(np.maximum(Y * (2.0 ** float(ev)), 1e-9), g) * a
     d = max(ceil - knee, 1e-6)
     np.copyto(y, knee + d * (1.0 - np.exp(-(y - knee) / d)), where=(y > knee))
+    # ---- 趾部（09-13 深夜 SV 拍板「对齐鹿井」）：最低那一段按 TOE 倍走，到 HI 之上完全不动 ----
+    # ★ 断点走**内容归一**（= 出口亮度 y 的中位 × 固定倍数），不是绝对亮度。
+    #   为什么要这样：固定绝对断点在亮场上正好，在**暗片**上整张图都落在断点之下
+    #   ⇒ 趾部退化成"全图乘 0.32"（实测 0071 中灰 28.8 → 16.5，那不是"只动最底部"）。
+    #   与项目既有原则一致：「形状抄大师**内容归一后**的形状，不能抄绝对亮度」。
+    toe = float(getattr(cfg, 'ENTRY_TOE', 1.0))
+    if toe < 1.0 - 1e-9:
+        _k = max(1, int(y.size // 3_000_000))
+        ym = float(np.median(y.reshape(-1)[::_k]))
+        if ym > 1e-9:
+            t0 = float(getattr(cfg, 'ENTRY_TOE_LO_REL', 0.08)) * ym
+            t1 = float(getattr(cfg, 'ENTRY_TOE_HI_REL', 0.84)) * ym
+            t = np.clip((y - t0) / max(t1 - t0, 1e-9), 0.0, 1.0)
+            y = y * (toe + (1.0 - toe) * t * t * (3.0 - 2.0 * t))
     return lin * (y / Y)[..., np.newaxis]
 
 
@@ -308,11 +331,14 @@ def load_raw(path, max_side=C.MAX_SIDE):
         lin = entry_tone(lin, bias, C, level=a_settle)
         # 报告用：此时曲线只贡献**零点**（形状已由固定成形负责），措辞别让人以为还在复现相机。
         cam['bias_source'] = cam.get('bias_source', '').replace('实测相机曲线', '实测零点')
-        cam['entry_shape'] = '胶片成形 γ%.3f %s 肩%.2f→%.3f' % (
+        cam['entry_shape'] = '胶片成形 γ%.3f %s 肩%.2f→%.3f %s' % (
             C.ENTRY_GAMMA,
             ('落点×%.3f(听相机)' % a_settle) if a_settle is not None
             else ('落点%.2f(全局)' % C.ENTRY_LEVEL),
-            C.ENTRY_KNEE, C.ENTRY_CEIL)
+            C.ENTRY_KNEE, C.ENTRY_CEIL,
+            ('趾×%.2f@中位×%.2f~%.2f' % (C.ENTRY_TOE, C.ENTRY_TOE_LO_REL,
+                                        C.ENTRY_TOE_HI_REL))
+            if float(getattr(C, 'ENTRY_TOE', 1.0)) < 1.0 - 1e-9 else '无趾部')
     elif curve is not None:
         # 实测曲线 = 一条"亮度 → 增益"的曲线：三通道乘同一个增益 ⇒ 只动亮度、不改色相
         # （契约：曲线只在亮度域做）。按输入亮度查，暗部/中间调/高光各自有自己的倍数。
