@@ -38,6 +38,24 @@ ENTRY_BIAS_ENABLE = True        # 总开关：入口按机型表 + RAF 的 DR ta
 # 只有"入口补不了"（非富士 / 读不到 tag）时，才退回让曝光层兜底提亮。
 AUTO_LIFT_ONLY_WHEN_NO_ENTRY_BIAS = True
 
+# ★★★★★ 入口高光护栏（09-13 SV 拍板「第三栏」）—— 「按高光不裁切定零点」，不是「照相机」
+# 病：入口按 baseline exposure 把欠曝**整幅补满**，若这台机身**没量过实测相机曲线**
+#   （如 X100VI）⇒ 退化成纯平直增益、**没有高光肩部** ⇒ P90 以上全顶死（2328 死白 19.5%）。
+#   梯度一旦过了 `np.clip(lin, 0, 1)` 就没了，L4 的 CAP_WHITE_FRAC 只能压暗一块平板，救不回形状。
+# 依据（三方一致，见 SKILL.md §19）：
+#   · Adobe DNG 规范：BaselineExposure = "**高光还能往回捞多少 EV 而不真裁切**" —— 是**余量**，不是该加的增益；
+#   · RawTherapee：EV=0 = **增益刚好让最亮的通道不裁切**，Auto 用 **Clip%（默认 0.2%）**定白点；
+#   · darktable filmic："把中间调调对，**高光别管**，filmic 会把它们捞回来"。
+# 做法：`g = k · g_入口`，k ≤ 1，取"使线性域裁切像素比例 ≤ ENTRY_CLIP_ALLOW"的最大 k。
+#   **只往下压，不往上加**；不裁切的图 k=1 ⇒ **逐位不变**。
+ENTRY_CLIP_GUARD = True         # 总开关
+ENTRY_CLIP_ALLOW = 0.030        # 允许"裁切"的像素比例上限（3%）。
+                                # ★ 选档口径 = 「只在该压时才压」，不是「越狠越好」：
+                                #   0.2%/1% 会把**本身就不曝**的 X100VI 片也压暗（DSCF2638 成片 L50 41→24/27）；
+                                #   3% 对它几乎不动（k=0.926），而 X-T30 III 三张全部 k≈1.0。
+                                #   实测表见 _debug/lab_hdr_entry_guard.py / SKILL.md §19.4。
+ENTRY_CLIP_LEVEL = 254.0 / 255.0  # 判"裁切"的**显示域**阈值（与 guard.CAP_WHITE_FRAC 同口径）
+
 # ========== L0 分析（判据：只用分位，绝不用均值） ==========
 PCT_BLACK = 0.2                 # 黑点分位
 PCT_MID = 50.0                  # 中灰分位

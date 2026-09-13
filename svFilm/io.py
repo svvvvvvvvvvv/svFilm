@@ -133,6 +133,38 @@ def apply_entry_curve(lin, curve):
     return lin * np.interp(Y, xs, gs)[..., np.newaxis]
 
 
+def clip_guard(lin, cfg=C):
+    """入口高光护栏：给入口增益设一个**只往下**的上限（按"允许裁切的像素比例"）。
+
+    为什么必须在**入口**做：高光的梯度只要过了下游的 `np.clip(lin, 0, 1)` 就没了，
+    L4 的 `guard.CAP_WHITE_FRAC` 只能把一块平板压暗，**救不回形状**（见 SKILL.md §19.2）。
+
+    依据（三方一致，见 SKILL.md §19.3）：
+      * Adobe DNG 规范：`BaselineExposure` = "高光还能往回捞多少 EV 而不真裁切" —— 是**余量**，
+        **不是"该加的增益"**；
+      * RawTherapee：EV=0 = **增益刚好让最亮的通道不裁切**，Auto 用 **Clip%**（默认 0.2%）定白点；
+      * darktable filmic："把中间调调对，**高光别管**"。
+
+    返回 (lin_out, k)。**k ≤ 1，不裁切的图 k=1 ⇒ 逐位不变。** 判据用线性亮度
+    （`color.luma`，与 `apply_entry_curve` 同一个量），"裁切"阈值 = 显示域 `ENTRY_CLIP_LEVEL` 的线性值。
+    """
+    if not getattr(cfg, 'ENTRY_CLIP_GUARD', False):
+        return lin, 1.0
+    allow = float(getattr(cfg, 'ENTRY_CLIP_ALLOW', 0.0))
+    lvl = float(color.s2l(float(getattr(cfg, 'ENTRY_CLIP_LEVEL', 254.0 / 255.0))))
+    y = color.luma(np.clip(lin, 0.0, None))
+    if float(np.mean(y >= lvl)) <= allow:
+        return lin, 1.0
+    lo, hi = 0.02, 1.0                    # 裁切比例随 k 单调不减 ⇒ 二分
+    for _ in range(28):
+        mid = 0.5 * (lo + hi)
+        if float(np.mean(y * mid >= lvl)) <= allow:
+            lo = mid
+        else:
+            hi = mid
+    return lin * lo, float(lo)
+
+
 def load_raw(path, max_side=C.MAX_SIDE):
     """RAW 解码 + IDT（白平衡 / 色彩矩阵由 rawpy 完成；**基线曝光**按机型表 + DR tag 补回）。"""
     import rawpy
@@ -216,6 +248,15 @@ def load_raw(path, max_side=C.MAX_SIDE):
         gain = float(2.0 ** bias)
         if gain != 1.0:
             lin = lin * gain
+
+    # ---- ★ 入口高光护栏（09-13 SV 拍板）：「按高光不裁切定零点」 ----
+    # 放在这里 = **在 `np.clip(lin, 0, 1)` 之前**，所以高光的梯度还救得回来。
+    # k ≤ 1 只往下压；不裁切的图 k=1 ⇒ 逐位不变（X-T30 III 三张实测 k≈1.0）。
+    if C.ENTRY_CLIP_GUARD:
+        lin, _gk = clip_guard(lin, C)
+        cam['entry_clip_guard_k'] = _gk
+        if _gk < 0.999:
+            cam['bias_source'] = '%s +高光护栏 ×%.3f' % (cam.get('bias_source', ''), _gk)
 
     lin, wb_info = idt_wb(lin)
     disp = np.clip(color.l2s(lin), 0.0, 1.0)
