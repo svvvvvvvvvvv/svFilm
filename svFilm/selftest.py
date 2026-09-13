@@ -520,6 +520,32 @@ def t_spatial_bloom_halation():
     df = float(np.abs(bf - flat).max())
     check('amount==spread 时平坦亮区不漂（能量守恒）', df < 0.01, 'max %.4f' % df)
 
+    # ★★ 09-13 修「脸变色」的两条护栏（SV 报 DSCF2638）：
+    #    老实现 `lin + amount*blur(lin*mask)` 把**模糊后的彩色光**直接加上去 ⇒
+    #    辉光会把**周围亮物的颜色搬到别处**（红抱枕的红光糊到脸上）。
+    #   ⑤ 数值不变量：`warmth=0` 时三通道的**增量必须完全相等**（只动亮度，不改色相）
+    mid = np.zeros((240, 240, 3)); mid[:, :] = 0.30          # 中灰底（不会顶到白）
+    mid[80:160, 80:160] = 1.0                                # 中间一块白
+    pm = dict(p['bloom']); pm.update(dict(amount=0.30, veil=0.0, spread=0.0, warmth=0.0))
+    bm, _ = spatial.bloom(mid, pm)
+    d_lin = color.s2l(bm) - color.s2l(mid)
+    selm = bm.max(axis=-1) < 0.99                            # 排除被裁到 1.0 的像素
+    dev = float(np.max(np.abs(d_lin[..., 0][selm] - d_lin[..., 2][selm])))
+    check('辉光只动亮度：warmth=0 时三通道增量相等（不改色相）', dev < 1e-6,
+          'max|ΔR−ΔB| %.2e' % dev)
+
+    #   ⑥ 语义不变量：**红块旁边不能把中性灰染红**（"不许搬邻居的颜色"）
+    blk = np.zeros((240, 240, 3)); blk[:, :] = 0.25
+    blk[:, :120] = np.array([1.0, 0.02, 0.02])               # 左半：鲜红亮块
+    pb = dict(p['bloom']); pb.update(dict(amount=0.50, veil=0.0, spread=0.0, warmth=0.0))
+    bb, _ = spatial.bloom(blk, pb)
+    lab_b = color.to_lab(bb); lab_0 = color.to_lab(blk)
+    right = np.zeros((240, 240), bool); right[:, 130:] = True   # 右半：离红块远一点的中性区
+    da = float(np.median(lab_b[..., 1][right] - lab_0[..., 1][right]))
+    db = float(np.median(lab_b[..., 2][right] - lab_0[..., 2][right]))
+    check('辉光不把邻居的颜色搬过来（红块旁的中性区不发红）', abs(da) < 1.0 and abs(db) < 1.0,
+          'Δa* %+.2f  Δb* %+.2f' % (da, db))
+
 
 def _skin_patch(a, b, L=62.0, size=64):
     lab = np.zeros((size, size, 3), np.float64)

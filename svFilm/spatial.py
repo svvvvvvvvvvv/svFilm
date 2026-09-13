@@ -140,6 +140,27 @@ def grain(disp, p, cfg=C):
 
 # ---------------- 丙：黑柔 / Bloom ----------------
 def bloom(disp, p, cfg=C):
+    """黑柔 = 三个**独立**机理，全部在**亮度域**算，只动亮度不改色相。
+
+    ★★ 为什么必须走亮度域（09-13 修，SV 报「DSCF2638 加完后脸变色」）：
+    老实现是 `out = lin + amount * blur(lin * mask)` —— 把**模糊后的彩色光**直接加到画面上。
+    后果：辉光把**周围亮物的颜色搬到别处**。实测那张片子里一个红色抱枕的红光被糊到整张脸和
+    画面上（脸区 a* 掉、b* 涨，视觉上是粉红雾）。
+    参考实现都不是这么干的：
+      * LIMO `blendBloom`：提取高光时按**自身颜色**提饱和（`mix(luma,rgb,1.05)`）再 **screen 混合**
+        （`1-(1-a)(1-b)`），注释写明"preserving highlight energy"；
+      * Emulsifier `engine.py`：**模糊的是"掩膜"（0~1 标量）而不是"光"**，再把模糊后的掩膜
+        当**中性量**加回去 ⇒ 基本不改色相。
+    ⇒ 这里统一成：**先把整件事在亮度 Y 上算完，再按同一个增量/增益作用回三通道**
+      （与 `tone.py`、`io.apply_entry_curve` 同一条契约：「曲线/增益只作用在亮度上，三通道同步」）。
+    顺带：模糊从"逐通道 3 次"降到"亮度 1 次"，spatial 更快。
+
+    三个机理：
+      * `amount` 加性辉光 —— 亮部往外**加**光（只加光）。
+      * `spread` 化开     —— 把高光掩膜区**自己的**能量扣掉、由模糊版补上；`amount==spread` 时守恒。
+      * `veil`   面纱     —— 整幅往模糊版靠（零均值：抬暗部、压高光）。
+    `warmth` 是**唯一**会改色的旋钮（只给"加进来的那部分光"染色），默认建议留着 0。
+    """
     amt = float(p.get('amount', 0.0))
     veil = float(p.get('veil', 0.0))
     spread = float(p.get('spread', 0.0))
@@ -155,36 +176,33 @@ def bloom(disp, p, cfg=C):
     g = color.gray_of(cur)
     radius = float(p.get('radius', 22.0))
 
-    # 只有够亮的地方才发光（软阈值，避免硬边）
+    Y = color.luma(lin)                                   # 线性亮度（标量场）
     m = color.smoothstep(g, float(p.get('thr_lo', 0.74)), float(p.get('thr_hi', 0.93)))
-    hot = lin * m[..., None]
-    glow = np.stack([_blur(hot[..., i], radius) for i in range(3)], axis=-1)
+    hotY = Y * m                                          # 亮部自己的能量（标量）
 
-    # 辉光偏暖一点（镜头/柔光镜的常见表现）
-    wa = float(p.get('warmth', 0.0))
-    glow = glow * np.array([1.0 + 0.10 * wa, 1.0 + 0.02 * wa, 1.0 - 0.10 * wa])
-
-    # ① 加性辉光（老行为）：亮部往外**加**光。
-    #    ⚠ 实测方向（09-13 `lab_physics_sweep.py`）：它只让高光端**更高更贴顶**
-    #    （P90/P95/P98 +0.06/+0.07/+0.14；>=253 从 0.00% 涨到 2.7%），
-    #    **不是"收敛"。** 局部确实变软（亮部高通 std −20%），但整体是"更亮"。
-    out_lin = lin + amt * glow
-
-    # ② ★ 能量守恒的「化开」（09-13 新增 `BLOOM_SPREAD`，默认 0 = 逐位等于老行为）。
-    #    把高光掩膜区**自己的**能量扣掉、由它的模糊版补上：`- spread * hot`。
-    #    核心处 blur(hot) < hot ⇒ 峰值**下降**；外圈 blur > 0 而 hot ≈ 0 ⇒ 光**散出去**。
-    #    总能量守恒（模糊不改总和，扣掉的正是加进去的）⇒ 这才是"高光化开 / 高调低反差"的机理。
-    #    大块平坦亮区里 blur(hot) ≈ hot ⇒ 基本不受影响，只动"小而亮"的东西。
+    Yg = Y
+    if amt > 0.0:
+        Yg = Yg + amt * _blur(hotY, radius)               # ① 加性辉光
     if spread > 0.0:
-        out_lin = out_lin - spread * hot
-
-    # 黑柔特征：整体往"模糊版"靠一点 => 轻微提灰、降对比（Black Pro Mist 那口气）
+        Yg = Yg - spread * hotY                           # ② 化开（核心峰值下降 / 外圈散出去）
     if veil > 0.0:
-        base = np.stack([_blur(out_lin[..., i], radius * 0.55) for i in range(3)], axis=-1)
-        out_lin = out_lin * (1.0 - veil) + base * veil
+        Yg = Yg + veil * (_blur(Yg, radius * 0.55) - Yg)  # ③ 面纱（零均值：抬暗部、压高光）
+
+    dY = Yg - Y
+    dY = np.maximum(dY, -Y)                               # 不许把亮度扣成负的
+    if dY.size and float(np.max(np.abs(dY))) < 1e-12:
+        return cur, dict(applied=False)
+
+    # `warmth`：**唯一**改色的地方 —— 只给"加进来的那部分光"染色（0 = 完全中性）
+    wa = float(p.get('warmth', 0.0))
+    tint = np.array([1.0 + 0.10 * wa, 1.0 + 0.02 * wa, 1.0 - 0.10 * wa])
+    out_lin = lin + dY[..., None] * tint
 
     out = np.clip(color.l2s(out_lin), 0.0, 1.0)
-    return out, dict(applied=True, amount=amt, radius=radius, veil=veil, spread=spread)
+    return out, dict(applied=True, amount=amt, radius=radius, veil=veil, spread=spread,
+                     warmth=wa, dY_mean=float(np.mean(dY)),
+                     dY_p99=float(np.percentile(dY, 99)),
+                     dY_p1=float(np.percentile(dY, 1)))
 
 
 # ---------------- 丁：Halation ----------------
