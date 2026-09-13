@@ -133,6 +133,30 @@ def apply_entry_curve(lin, curve):
     return lin * np.interp(Y, xs, gs)[..., np.newaxis]
 
 
+def entry_tone(lin, ev, cfg=C):
+    """入口成形（09-13 SV 拍板「乙」）：**场景线性光 + 一条固定的亮度/反差/肩部曲线**。
+
+    与 `apply_entry_curve` 的分工：
+      * 旧：按 机型×DR 实测的「RAW → 机内 JPEG」逐亮度增益 —— **把相机的机内风格一起搬进来**
+        （实测把动态范围压掉 ~2.5 倍、2328 有 13% 像素被顶穿 1.0 ⇒ 高光砸成平板）。
+      * 新：只做两件与口味无关的事 ——
+          ① 零点：`× 2^ev`（ev = 实测 mid_ev，只补"相机故意欠曝"那几档）⇒ 近似**场景线性光**；
+          ② 形状：`y' = ENTRY_LEVEL · y^ENTRY_GAMMA` + **软肩部**（超过 ENTRY_KNEE 平滑压向 ENTRY_CEIL）。
+
+    仍然**只动亮度、不改色相**（三通道乘同一个"亮度→增益"，与 `apply_entry_curve` 同契约）。
+    全局只有 `ENTRY_LEVEL` 一个参数，**没有任何逐图旋钮** ⇒ 可迭代性不打折。
+    """
+    g = float(getattr(cfg, 'ENTRY_GAMMA', 1.0))
+    a = float(getattr(cfg, 'ENTRY_LEVEL', 1.0))
+    knee = float(getattr(cfg, 'ENTRY_KNEE', 1.0))
+    ceil = float(getattr(cfg, 'ENTRY_CEIL', 1.0))
+    Y = np.maximum(color.luma(np.clip(lin, 0.0, None)), 1e-9)
+    y = np.power(np.maximum(Y * (2.0 ** float(ev)), 1e-9), g) * a
+    d = max(ceil - knee, 1e-6)
+    np.copyto(y, knee + d * (1.0 - np.exp(-(y - knee) / d)), where=(y > knee))
+    return lin * (y / Y)[..., np.newaxis]
+
+
 def clip_guard(lin, cfg=C):
     """入口高光护栏：给入口增益设一个**只往下**的上限（按"允许裁切的像素比例"）。
 
@@ -239,7 +263,16 @@ def load_raw(path, max_side=C.MAX_SIDE):
             else:
                 cam['bias_source'] = '仅机型基底（无 DR tag）'
     cam['idt_bias_ev'] = bias              # 下游据此判断"入口补过了没有"
-    if curve is not None:
+    if C.ENTRY_BIAS_ENABLE and getattr(C, 'ENTRY_TONE', False):
+        # ★ 入口成形（09-13 SV 拍板「乙」）：零点(一个 EV) + 固定的亮度/反差/肩部曲线。
+        #   不再复现机内 JPEG ⇒ 不会把"相机的机内风格 + 测光偏亮"一起搬进来（见 config.py）。
+        #   对"没量过曲线的机身"也是同一条路（bias = 机型基底 + DR 查表）⇒ 全机型口径统一。
+        lin = entry_tone(lin, bias, C)
+        # 报告用：此时曲线只贡献**零点**（形状已由固定成形负责），措辞别让人以为还在复现相机。
+        cam['bias_source'] = cam.get('bias_source', '').replace('实测相机曲线', '实测零点')
+        cam['entry_shape'] = '胶片成形 γ%.3f L%.2f 肩%.2f→%.3f' % (
+            C.ENTRY_GAMMA, C.ENTRY_LEVEL, C.ENTRY_KNEE, C.ENTRY_CEIL)
+    elif curve is not None:
         # 实测曲线 = 一条"亮度 → 增益"的曲线：三通道乘同一个增益 ⇒ 只动亮度、不改色相
         # （契约：曲线只在亮度域做）。按输入亮度查，暗部/中间调/高光各自有自己的倍数。
         lin = apply_entry_curve(lin, curve)
