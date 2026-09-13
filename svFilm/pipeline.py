@@ -6,6 +6,8 @@
 
 空间域（颗粒/黑柔/Halation）夹在 L2 与 L3 之间：它是"胶片的物理过程"，
 发生在颜色定下来之后、局部修补之前。见 spatial.py。
+层内顺序 = **bloom（镜头）→ halation（乳剂/片基）→ grain（银盐）**
+（09-13 晚按 P1-4 改：光学在前，镜头像差发生在乳剂之前）。
 """
 from __future__ import annotations
 
