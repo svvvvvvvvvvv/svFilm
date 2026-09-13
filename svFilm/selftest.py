@@ -1246,13 +1246,25 @@ def t_l4_caps():
           '%.3f ≤ %.3f' % (sc[-1], cap_f + soft))
     check('软压：单调不回头（压完还是越亮越亮）', bool(np.all(np.diff(sc) >= -1e-9)))
 
+    # ②b 力度（SV 09-14：「背景压太多了，压一半试试」）
+    check('力度出厂 = 0.5（压一半；1.0 = 全压，0.0 = 等于关闸）',
+          abs(float(C.CAP_STRENGTH) - 0.5) < 1e-9, '%.2f' % C.CAP_STRENGTH)
+    check('接线：力度从 config 读（没写死）', 'CAP_STRENGTH' in src)
+    pressed_full = L - guard._soft_cap_L(L, cap_f, soft, 1.0)
+    pressed_half = L - guard._soft_cap_L(L, cap_f, soft, 0.5)
+    check('力度 0.5 ⇒ 压掉的量正好是全压的一半（不是拍脑袋）',
+          bool(np.allclose(pressed_half[3:], 0.5 * pressed_full[3:], atol=1e-9)),
+          '全压 %s ／ 半压 %s' % (np.round(pressed_full[3:], 2), np.round(pressed_half[3:], 2)))
+    check('力度 0 ⇒ 一个像素都不动（等于关闸）',
+          bool(np.allclose(guard._soft_cap_L(L, cap_f, soft, 0.0), L)))
+
     # ③ 合成图上真的生效（左半 = 脸·暗端，右半 = 背景·亮端）
     H, W = 64, 256
     g = np.linspace(0.0, 1.0, W, dtype=np.float32)
     img = np.stack([np.repeat(g[None, :], H, 0)] * 3, -1)
     mf = np.zeros((H, W), np.float32); mf[:, :W // 2] = 1.0
     mb = np.zeros((H, W), np.float32); mb[:, W // 2:] = 1.0
-    out, info = guard.cap_face_bg(img, C, masks=dict(face_skin=mf, bg=mb))
+    out, _ = guard.cap_face_bg(img, C, masks=dict(face_skin=mf, bg=mb))   # 出厂力度 0.5
     Lb = color.L_of_lin(color.Y_of(color.s2l(np.clip(img, 0, 1))))
     La = color.L_of_lin(color.Y_of(color.s2l(np.clip(out, 0, 1))))
     face_dark = np.zeros((H, W), bool); face_dark[:, :int(W * 0.25)] = True
@@ -1260,11 +1272,25 @@ def t_l4_caps():
     check('合成图·脸：本来就暗的**一个像素都没动**（只压不提）',
           bool(np.allclose(La[face_dark], Lb[face_dark], atol=0.05)),
           'Δ 最大 %.4f' % float(np.max(np.abs(La[face_dark] - Lb[face_dark]))))
-    check('合成图·背景：超上限的被压下去',
+    check('合成图·背景：超上限的被压下去（力度 %.2f）' % C.CAP_STRENGTH,
           float(np.median(La[bg_hi])) < float(np.median(Lb[bg_hi])) - 1.0,
           '%.2f → %.2f' % (float(np.median(Lb[bg_hi])), float(np.median(La[bg_hi]))))
-    check('合成图·背景：压完仍 ≤ 上限+soft', float(np.max(La[bg_hi])) <= cap_b + soft + 0.5,
-          'max %.2f ≤ %.2f' % (float(np.max(La[bg_hi])), cap_b + soft))
+    # ⚠ 「再亮也到不了 上限+soft」**只在力度 1.0 时成立**（力度 <1 时只压超出量的一部分，
+    #    渐近线是"越来越亮但压得动"，本来就不是硬顶）⇒ 这条断言必须显式用 1.0 验，别守错世界。
+    _s0 = float(C.CAP_STRENGTH)
+    try:
+        C.CAP_STRENGTH = 1.0
+        out1, _ = guard.cap_face_bg(img, C, masks=dict(face_skin=mf, bg=mb))
+        La1 = color.L_of_lin(color.Y_of(color.s2l(np.clip(out1, 0, 1))))
+        check('力度 1.0（全压）⇒ 背景再亮也 ≤ 上限+soft（这时才是真上限）',
+              float(np.max(La1[bg_hi])) <= cap_b + soft + 0.5,
+              'max %.2f ≤ %.2f' % (float(np.max(La1[bg_hi])), cap_b + soft))
+        check('力度旋钮真的有用：1.0 比 0.5 压得更狠',
+              float(np.median(La1[bg_hi])) < float(np.median(La[bg_hi])) - 1.0,
+              '0.5→%.2f  1.0→%.2f' % (float(np.median(La[bg_hi])),
+                                       float(np.median(La1[bg_hi]))))
+    finally:
+        C.CAP_STRENGTH = _s0
     z = np.zeros((H, W), np.float32)
     out0, info0 = guard.cap_face_bg(img, C, masks=dict(face_skin=z, bg=z))
     check('掩膜为空 ⇒ 一个像素都不动（不做任何猜测）',

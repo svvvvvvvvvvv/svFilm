@@ -44,21 +44,25 @@ def _cap_chroma(disp, cap):
     return np.clip(color.from_lab(lab), 0.0, 1.0), True
 
 
-def _soft_cap_L(L, cap, soft):
+def _soft_cap_L(L, cap, soft, strength=1.0):
     r"""超过 `cap` 的部分**平滑收回**，不是一刀切。
 
-        excess = max(L − cap, 0)
-        L_out  = L − excess + soft · tanh(excess / soft)
+        excess  = max(L − cap, 0)
+        press   = excess − soft · tanh(excess / soft)   ← **全压**时收回多少
+        L_out   = L − `strength` · press                ← 力度：`CAP_STRENGTH`
 
-    三条性质（都是"不许超过"要的）：
+    四条性质（都是"不许超过"要的）：
       · excess = 0 ⇒ L_out = L（**暗的一律不动**，只压不提）
       · 在 cap 处**值与斜率都连续** ⇒ 不会压出台阶 / 断层
         （对应 SV 手册那句「发丝边上还能看出一丝丝分层，不是一条死白线」）
-      · 无论多亮，收回来后**永远到不了 cap + soft** ⇒ 是真上限，不是渐近无限的软塌
+      · strength = 1 ⇒ 无论多亮都**到不了 cap + soft**（真上限）；
+        strength < 1 ⇒ 只压掉超出量的这个比例（SV 09-14："背景压太多了，压一半试试"）
+      · 单调不回头：压完还是越亮越亮
     """
     e = np.clip(np.asarray(L, np.float64) - float(cap), 0.0, None)
     s = max(float(soft), 1e-6)
-    return L - e + s * np.tanh(e / s)
+    press = e - s * np.tanh(e / s)
+    return L - float(strength) * press
 
 
 def _feather(m, rel, hw):
@@ -93,6 +97,7 @@ def cap_face_bg(disp, cfg=C, masks=None):
     cap_face = float(getattr(cfg, 'FACE_CAP_L', 68.0))
     cap_bg = cap_face - float(getattr(cfg, 'BG_CAP_REL_L', 17.0))
     soft = float(getattr(cfg, 'CAP_SOFT_L', 6.0))
+    strength = float(np.clip(getattr(cfg, 'CAP_STRENGTH', 1.0), 0.0, 1.0))
     rel_f = float(getattr(cfg, 'CAP_FEATHER_REL', 0.006))
     hw = d.shape[:2]
 
@@ -101,17 +106,21 @@ def cap_face_bg(disp, cfg=C, masks=None):
     if float(np.max(wf)) < 1e-3 and float(np.max(wb)) < 1e-3:
         info['reason'] = 'empty_mask'
         return d, info
+    if strength <= 1e-6:
+        info['reason'] = 'strength0'
+        return d, info
 
     lin = color.s2l(d)
     L = color.L_of_lin(color.Y_of(lin))
-    Lc = L + wf * (_soft_cap_L(L, cap_face, soft) - L) \
-           + wb * (_soft_cap_L(L, cap_bg, soft) - L)
+    Lc = L + wf * (_soft_cap_L(L, cap_face, soft, strength) - L) \
+           + wb * (_soft_cap_L(L, cap_bg, soft, strength) - L)
 
     out = d.copy()
     wsel = (wf > 1.0e-6) | (wb > 1.0e-6)
     if np.any(wsel):
         out[wsel] = color.retone_L(lin[wsel], Lc[wsel])
     info.update(applied=True, cap_face=cap_face, cap_bg=cap_bg, soft=soft,
+                strength=strength,
                 face_cov=float(np.mean(wf)), bg_cov=float(np.mean(wb)),
                 face_L=float(np.median(L[wf > 0.5])) if np.any(wf > 0.5) else None,
                 bg_L=float(np.median(L[wb > 0.5])) if np.any(wb > 0.5) else None)
