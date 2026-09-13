@@ -10,7 +10,7 @@ import tempfile
 
 import numpy as np
 
-from . import (analyze, cameras, color, config as C, denoise, guard, io, local, metrics,
+from . import (analyze, cameras, color, config as C, denoise, face, guard, io, local, metrics,
                pipeline, rawmeta, spatial, stocks, style, tone)
 
 FAIL = []
@@ -1151,13 +1151,68 @@ def t_entry_toe():
           and "getattr(cfg, 'ENTRY_TOE_HI_REL', 0.84)" in _src)
 
 
+def t_face_layer():
+    """★ 脸层（L3）+ 第 4 条「每层护脸」+ 光方向那条线（09-14 落进生产）—— 全都不依赖模型。"""
+    import inspect
+    print('[脸层 · 每层护脸 · 光方向线]')
+    # ① 出厂值（SV 09-14 拍板「乙」：靶从 p25=62 提到中位 68）
+    check('脸层出厂开着（09-13 已转正）', C.FACE_ENABLE is True)
+    check('① 位置靶 = 68（鹿井脸 L* 中位；「乙」把原来的 p25=62 换掉）',
+          float(C.FACE_TGT_L) == 68.0, '%.1f' % C.FACE_TGT_L)
+    check('第 4 条「每层护脸」出厂开着', C.FACE_GUARD_LAYERS is True)
+    # ② 接线：真的插了两道、真的读开关（不是"接了没通"）
+    src = inspect.getsource(pipeline.run)
+    check('接线：pipeline.run 里调了两次 local.face_tone（L2 后 / 空间层后）',
+          src.count('local.face_tone(') >= 2, 'count=%d' % src.count('local.face_tone('))
+    check('接线：那道门读的是 FACE_GUARD_LAYERS（没有写死）',
+          'FACE_GUARD_LAYERS' in inspect.getsource(pipeline._face_guard_on))
+    # ③ 两条线的关系：跨度线 35；左右差线 0.06，且"没方向"的门落在 (0, 线) 之间
+    check('② 两条线：跨度线 35，方向线 0.060，"没方向"门 0.030 夹在中间',
+          float(C.FACE_TGT_SPAN) == 35.0 and float(C.FACE_TGT_LRDIF) == 0.060
+          and 0.0 < float(C.FACE_DIR_MIN) < float(C.FACE_TGT_LRDIF),
+          'min=%.3f line=%.3f' % (C.FACE_DIR_MIN, C.FACE_TGT_LRDIF))
+
+    # ④ 光方向量测：合成脸，只改左右亮度 ⇒ 符号必须跟着走（这层真正的算法）
+    H = W = 400
+    gys, gxs = np.indices((H, W))
+    sel = (((gxs - 200.0) / 55.0) ** 2 + ((gys - 210.0) / 95.0) ** 2) <= 1.0
+    skin = sel.astype(np.float32)
+    ramp = np.clip((gxs - 200.0) / 55.0, -1.0, 1.0)              # −1 = 画面最左，+1 = 最右
+    a_flat = face.lr_asym(np.full((H, W), 60.0), skin, sel, cfg=C)
+    a_ramp = face.lr_asym(60.0 + 18.0 * ramp, skin, sel, cfg=C)   # 左暗右亮
+    a_rev = face.lr_asym(60.0 - 18.0 * ramp, skin, sel, cfg=C)    # 左亮右暗
+    check('光方向：平光脸的左右差 ≈ 0',
+          a_flat[0] is None or abs(a_flat[0]) < 0.01,
+          'asym=%s' % ('None' if a_flat[0] is None else '%.4f' % a_flat[0]))
+    check('光方向：左暗右亮 ⇒ asym > 0（画面右侧更亮）',
+          a_ramp[0] is not None and a_ramp[0] > 0.05,
+          'asym=%s n=%d' % ('None' if a_ramp[0] is None else '%.4f' % a_ramp[0], a_ramp[1]))
+    check('光方向：左右反过来 ⇒ asym 反号',
+          a_rev[0] is not None and a_rev[0] < -0.05,
+          'asym=%s' % ('None' if a_rev[0] is None else '%.4f' % a_rev[0]))
+    check('光方向：配对数不够 ⇒ 拒答（返回 None，不硬给一个方向）',
+          face.lr_asym(np.full((H, W), 60.0), skin, np.zeros((H, W), bool), cfg=C)[0] is None)
+    check('光方向：口径写在 docstring 里（量的是「哪半边脸更亮」，不是太阳在哪边）',
+          '哪半边脸更亮' in (face.lr_asym.__doc__ or ''))
+    # ⑤ 这条线的接线规则（照 `local.face_tone` 里的算法复算）：没方向 ⇒ 1；有方向 ⇒ 线/|asym|
+    kdir = lambda a: (1.0 if (a is None or abs(a) < C.FACE_DIR_MIN)                # noqa: E731
+                      else min(max(C.FACE_TGT_LRDIF / abs(a), 1.0), C.FACE_SPAN_KMAX))
+    check('左右差线：没方向 ⇒ k_dir = 1（绝不给平光脸编方向）',
+          kdir(None) == 1.0 and kdir(0.010) == 1.0 and kdir(-0.029) == 1.0)
+    check('左右差线：有方向 ⇒ k_dir = 线/|asym|，并夹在 [1, 2.4]',
+          abs(kdir(0.030) - 2.0) < 1e-6 and kdir(0.500) == 1.0 and kdir(0.010) == 1.0,
+          'k(0.030)=%.3f k(0.500)=%.3f' % (kdir(0.030), kdir(0.500)))
+    check('左右差线：k 取两条线里更高的那个（max），不是相乘（不许把同一次放大算两遍）',
+          'k = max(k_span, k_dir)' in inspect.getsource(local.face_tone))
+
+
 def main():
     for fn in (t_color, t_analyze, t_tone_mid_target, t_tone_monotone, t_style_lock,
                t_style_contrast_direction, t_style_tone_curve, t_style_chroma_ends, t_denoise,
                t_guard, t_lut,
                t_io_roundtrip, t_stocks, t_spatial_off, t_spatial_grain,
                t_spatial_bloom_halation, t_local_skin_floor, t_entry_bias, t_pipeline_smoke,
-               t_review_fixes, t_entry_settle, t_entry_toe):
+               t_review_fixes, t_entry_settle, t_entry_toe, t_face_layer):
         fn()
     print('-' * 52)
     if FAIL:

@@ -135,12 +135,21 @@ def face_tone(disp, cfg=C):
       * ★ **只碰明度**（`color.retone_L` 同步缩放 RGB，色相/彩度关系不动）。
       * ★ 两个动作都只在**人物权重**上做，而该权重在**背景掩膜里恒为 0** ⇒ 背景一个像素不碰。
 
-    两句规则（09-13 深夜 SV 定）：
-      ① 位置：`补光量 = max(0, 靶 − 脸中位)`，**只提不压**。靶 = 鹿井「脸 L*」的 **p25 = 62**（下沿，不是中位）。
+    两句规则（SV 定；09-14 把靶提到 68 并接上第二条线）：
+      ① 位置：`补光量 = max(0, 靶 − 脸中位)`，**只提不压**。
+         靶 = 鹿井「脸 L*」的 **中位 67.9 ⇒ 取 68**（09-14 SV 拍板「乙」；原来用的是 p25 = 62）。
          脸本来就在靶之上的片子（0791 脸 90.6 / 2328 脸 89.8）⇒ 补光量 = 0 ⇒ 一格不动。
-      ② 形状：以**脸自己的中位**为锚，把已有的明暗拉开 `k = 线/现状`（≤2.4 倍），**不编光**；
-         线 = 鹿井「脸内部跨度（框内皮肤 P90−P10）」的 p25 = 35。变亮那部分最多到 L\*97（不动暗部）。
+      ② 形状：以**脸自己的中位**为锚，把已有的明暗拉开 `k = 线/现状`（≤2.4 倍），**不编光**。
+         **两条线取要求更高的那个 k**：
+           · 跨度线 = 鹿井「脸内部跨度（框内皮肤 P90−P10）」的 p25 = **35**；
+           · 左右差线 = 鹿井「脸的左右差（左右镜像法）」的 p25 = **0.06**（★ 光方向那条，
+             09-14 落进生产）。⚠ 它只在"脸上**本来就量得出方向**"时才参与
+             ⇒ 平光脸不会被编出一个方向（那正是 §37.11 的闪光灯错例）。
+         变亮那部分最多到 L\*97（不动暗部）。
       ⚠ **顺序不可换**：形状的锚点（脸中位）必须在**位置定好之后**才取，否则锚点是错的。
+    ★ 这一层会被 `pipeline.run` 在 **L2 之后 / 空间层之后 / L3** 各调一次
+      （第 4 条「每层护脸」，`FACE_GUARD_LAYERS`）—— 因为把脸压平的主力是**黑柔 + 颗粒**，
+      在末尾补一道到不了靶。靶是绝对值 ⇒ 后层压下去、下一道就补回来，重复调用是**幂等收敛**的。
 
     ★ 「脸在哪」（09-14 SV 选「甲」）：两个动作用脸的**方式不一样**，这点容易混 ——
       · **提亮** = 提**整个人**（力道落 `person_weight`，脸/手/衣服一起动）。脸在这里是**尺子**：
@@ -196,13 +205,31 @@ def face_tone(disp, cfg=C):
                        float(getattr(cfg, 'FACE_LIFT_MAX', 40.0))))
     L1 = (L + pw * dL) if dL > 1e-3 else L
 
-    # ---- ② 形状：以脸中位为锚拉开已有的明暗 ----
+    # ---- ② 形状：以脸中位为锚拉开已有的明暗（★ 两条线，取要求更高的那个 k）----
     q10, q90 = np.percentile(L1[sel], [10.0, 90.0])
     span = float(q90 - q10)
-    k = float(np.clip(float(getattr(cfg, 'FACE_TGT_SPAN', 35.0)) / max(span, 1e-6),
-                      1.0, float(getattr(cfg, 'FACE_SPAN_KMAX', 2.4))))
+    kmax = float(getattr(cfg, 'FACE_SPAN_KMAX', 2.4))
+    k_span = float(np.clip(float(getattr(cfg, 'FACE_TGT_SPAN', 35.0)) / max(span, 1e-6), 1.0, kmax))
+    # ★ 第二条线 = **光方向**（左右差 ≥ `FACE_TGT_LRDIF`，09-14 落进生产）。
+    #   见 config 那段的说明：只有"脸上**本来就量得出方向**"（|左右差| ≥ `FACE_DIR_MIN`）时
+    #   这条线才参与 ⇒ 正面光/闪光灯的脸 k_dir 恒为 1 ⇒ **绝不给平光脸编方向**（§37.11 的错例）。
+    #   参与方式 = 和跨度线**取更高的那个 k**（不新写一个动作，避免同一次放大被算两遍）。
+    asym, n_pair, dir_how, k_dir = None, 0, 'off', 1.0
+    if bool(getattr(cfg, 'FACE_DIR_ENABLE', True)):
+        try:
+            asym, n_pair, dir_how = face.lr_asym(
+                L1, st['masks']['skin'], sel,
+                lm=(f or {}).get('lm'), box=(f or {}).get('box'),
+                eyed=(f or {}).get('eyed'), cfg=cfg)
+        except Exception:                                       # noqa: BLE001
+            asym, n_pair, dir_how = None, 0, 'err'
+        if asym is not None and abs(asym) >= float(getattr(cfg, 'FACE_DIR_MIN', 0.030)):
+            k_dir = float(np.clip(float(getattr(cfg, 'FACE_TGT_LRDIF', 0.060))
+                                  / max(abs(asym), 1e-6), 1.0, kmax))
+    k = max(k_span, k_dir)
     if dL <= 1e-3 and k <= 1.0 + 1e-9:
-        info.update(reason='nothing_to_do', face_L=Lb, span=span, k=k, lift=0.0, how=how)
+        info.update(reason='nothing_to_do', face_L=Lb, span=span, k=k, lift=0.0, how=how,
+                    asym=asym, n_pair=n_pair, dir_how=dir_how, k_span=k_span, k_dir=k_dir)
         return d, info
     Ls = float(np.median(L1[sel]))
     cap = float(getattr(cfg, 'FACE_TOP_CAP', 97.0))
@@ -217,8 +244,8 @@ def face_tone(disp, cfg=C):
     if np.any(wsel):
         out[wsel] = color.retone_L(lin[wsel], L2[wsel])
     info.update(applied=True, how=how, face_L_before=Lb, face_L=Ls, lift=dL,
-                span=span, k=k, person_cov=float(np.mean(pw)),
-                feather_cov=float(np.mean(w)))
+                span=span, k=k, k_span=k_span, k_dir=k_dir, asym=asym, n_pair=n_pair,
+                dir_how=dir_how, person_cov=float(np.mean(pw)), feather_cov=float(np.mean(w)))
     return out, info
 
 
