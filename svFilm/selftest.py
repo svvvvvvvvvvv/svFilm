@@ -1152,7 +1152,7 @@ def t_entry_toe():
 
 
 def t_face_layer():
-    """★ 脸层（L3）+ 第 4 条「每层护脸」+ 光方向那条线（09-14 落进生产）—— 全都不依赖模型。"""
+    """★ 脸层（L3）+ 第 4 条「每层护脸」+ 光方向（只量不改，09-14 撤掉"第二条线"）—— 全都不依赖模型。"""
     import inspect
     print('[脸层 · 每层护脸 · 光方向线]')
     # ① 出厂值（SV 09-14 拍板「乙」：靶从 p25=62 提到中位 68）
@@ -1166,9 +1166,11 @@ def t_face_layer():
           src.count('local.face_tone(') >= 2, 'count=%d' % src.count('local.face_tone('))
     check('接线：那道门读的是 FACE_GUARD_LAYERS（没有写死）',
           'FACE_GUARD_LAYERS' in inspect.getsource(pipeline._face_guard_on))
-    # ③ 两条线的关系：跨度线 35；左右差线 0.06，且"没方向"的门落在 (0, 线) 之间
-    check('② 两条线：跨度线 35，方向线 0.060，"没方向"门 0.030 夹在中间',
-          float(C.FACE_TGT_SPAN) == 35.0 and float(C.FACE_TGT_LRDIF) == 0.060
+    # ③ 线只有一条：形状放大只认跨度线 35；光方向那条线**只量**（09-14 撤掉了"当第二条线"）
+    check('② 形状只认一条线：跨度线 = 35',
+          float(C.FACE_TGT_SPAN) == 35.0, '%.1f' % C.FACE_TGT_SPAN)
+    check('② 光方向 = 只量不改：FACE_DIR_MEASURE 开着；参考线 0.060 "没方向"门 0.030 夹得住',
+          bool(C.FACE_DIR_MEASURE) is True
           and 0.0 < float(C.FACE_DIR_MIN) < float(C.FACE_TGT_LRDIF),
           'min=%.3f line=%.3f' % (C.FACE_DIR_MIN, C.FACE_TGT_LRDIF))
 
@@ -1194,16 +1196,16 @@ def t_face_layer():
           face.lr_asym(np.full((H, W), 60.0), skin, np.zeros((H, W), bool), cfg=C)[0] is None)
     check('光方向：口径写在 docstring 里（量的是「哪半边脸更亮」，不是太阳在哪边）',
           '哪半边脸更亮' in (face.lr_asym.__doc__ or ''))
-    # ⑤ 这条线的接线规则（照 `local.face_tone` 里的算法复算）：没方向 ⇒ 1；有方向 ⇒ 线/|asym|
-    kdir = lambda a: (1.0 if (a is None or abs(a) < C.FACE_DIR_MIN)                # noqa: E731
-                      else min(max(C.FACE_TGT_LRDIF / abs(a), 1.0), C.FACE_SPAN_KMAX))
-    check('左右差线：没方向 ⇒ k_dir = 1（绝不给平光脸编方向）',
-          kdir(None) == 1.0 and kdir(0.010) == 1.0 and kdir(-0.029) == 1.0)
-    check('左右差线：有方向 ⇒ k_dir = 线/|asym|，并夹在 [1, 2.4]',
-          abs(kdir(0.030) - 2.0) < 1e-6 and kdir(0.500) == 1.0 and kdir(0.010) == 1.0,
-          'k(0.030)=%.3f k(0.500)=%.3f' % (kdir(0.030), kdir(0.500)))
-    check('左右差线：k 取两条线里更高的那个（max），不是相乘（不许把同一次放大算两遍）',
-          'k = max(k_span, k_dir)' in inspect.getsource(local.face_tone))
+    # ⑤ 接线守卫：光方向那条线**不参与放大**（09-14 撤掉"第二条线"：k_dir/k_span 不许再出现）；
+    #    asym 只进 info；形状的 k 只由跨度线决定。
+    fs = inspect.getsource(local.face_tone)
+    check('光方向这条线不参与 k：源码里没有 k_dir / k_span（09-14 撤，DSCF2236 被炸到 69.4）',
+          'k_dir' not in fs and 'k_span' not in fs)
+    check('光方向：量出来写进 info（asym / n_pair / dir_how），且读 FACE_DIR_MEASURE 开关（不写死）',
+          fs.count('asym=asym') >= 2 and 'n_pair=n_pair' in fs and 'dir_how=dir_how' in fs
+          and 'FACE_DIR_MEASURE' in fs)
+    check('形状的 k 只由跨度线决定（线 FACE_TGT_SPAN / 现状 span，夹在 [1, FACE_SPAN_KMAX]）',
+          'FACE_TGT_SPAN' in fs and 'FACE_SPAN_KMAX' in fs and 'FACE_TGT_LRDIF' not in fs)
 
 
 def main():
