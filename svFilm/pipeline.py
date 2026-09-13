@@ -101,6 +101,10 @@ def _allow_lift(sample, cfg, rep=None):
         return True
     if not cfg.AUTO_LIFT_ONLY_WHEN_NO_ENTRY_BIAS:
         return True
+    # ★ 位置逐张听相机（09-13 深夜）：入口落点已由「机型×DR 实测落点规律」**逐张**定过 ⇒
+    #   兜底提亮必须让位，否则同一个"位置"会被补两次（规律本来就把暗片放到相机的位置上了）。
+    if (sample.cam or {}).get('entry_settle'):
+        return False
     return bool(rep is not None and rep.get('dark_lift'))
 
 

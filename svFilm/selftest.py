@@ -978,13 +978,87 @@ def t_review_fixes():
           '%.4f vs %.4f' % (info_dk['y_out'][-1], float(color.s2l(C.TGT_WHITE))))
 
 
+def t_entry_settle():
+    """★ 位置逐张听相机（09-13 深夜）—— 「相机落点规律」+ 回落行为 + 口径守卫。"""
+    import math
+
+    law = cameras.settle_law_models()
+    check('落点规律：至少标了一个机型', bool(law), str(law))
+    check('落点规律：X-T30 III 已标定', 'x-t30 iii' in law)
+    for _dr in (100, 200, 400):
+        check('落点规律：X-T30 III DR%s 有偏移项' % _dr,
+              _dr in cameras.SETTLE_LAW['x-t30 iii']['dr_off'])
+
+    # ① 单调 + 序：同 DR 档内随场景亮度单调不减；同一 e 上 DR 越高落点越大
+    _a = [cameras.entry_settle_level('X-T30 III', 100, e) for e in (-5.0, -3.0, -1.0, 0.0, 1.0)]
+    check('落点规律：同 DR 档内随场景亮度单调不减（"逐张"项真的在动）',
+          all(_a[i] <= _a[i + 1] + 1e-12 for i in range(len(_a) - 1)),
+          str([round(v, 4) for v in _a]))
+    _b = [cameras.entry_settle_level('X-T30 III', d, -3.0) for d in (100, 200, 400)]
+    check('落点规律：同一场景亮度上 DR 越高落点越大', _b[0] < _b[1] < _b[2],
+          str([round(v, 4) for v in _b]))
+
+    # ② 钉住数值（拟合结果，不是随手填的；乱改 alpha/beta/dr_off 会红）
+    _v4 = cameras.entry_settle_level('X-T30 III', 400, -3.39)
+    check('落点规律：DR400 @e=−3.39 → 落点 ≈1.295（5 折留出集中位误差 1.32 L*）',
+          abs(_v4 - 1.295) < 0.02, 'a=%.4f' % _v4)
+    _v1 = cameras.entry_settle_level('X-T30 III', 100, -0.19)
+    check('落点规律：DR100 @e=−0.19 → 落点 ≈0.662（比全局 0.55 亮 0.27 档）',
+          abs(_v1 - 0.662) < 0.02, 'a=%.4f' % _v1)
+
+    # ③ 回落：没标定 / DR 不认 / 拿不到 e / dr 缺失 ⇒ None（调用方回落 ENTRY_LEVEL）
+    check('落点规律：没标定的机型回落（None）',
+          cameras.entry_settle_level('A7C II', 400, -3.0) is None)
+    check('落点规律：DR 不认回落（None）',
+          cameras.entry_settle_level('X-T30 III', 800, -3.0) is None)
+    check('落点规律：拿不到场景曝光回落（None）',
+          cameras.entry_settle_level('X-T30 III', 400, None) is None)
+    check('落点规律：dr 缺失回落（None）',
+          cameras.entry_settle_level('X-T30 III', None, -3.0) is None)
+
+    # ④ 入口接线：level 传了就用它；level=None 与 level=ENTRY_LEVEL 逐位相同（回落不改行为）
+    _img = np.full((24, 28, 3), 0.2)
+    _o_glob = io.entry_tone(_img, 0.0, C)
+    _o_same = io.entry_tone(_img, 0.0, C, level=float(C.ENTRY_LEVEL))
+    check('入口成形：level=None 与 level=全局值 逐位相同（回落 = 旧行为）',
+          float(np.max(np.abs(_o_glob - _o_same))) < 1e-15)
+    _o_hi = io.entry_tone(_img, 0.0, C, level=float(C.ENTRY_LEVEL) * 2.0)
+    check('入口成形：level 给大 ⇒ 出图更亮（接线真的生效，不是接了没通）',
+          float(np.mean(_o_hi)) > float(np.mean(_o_glob)),
+          '%.5f > %.5f' % (float(np.mean(_o_hi)), float(np.mean(_o_glob))))
+
+    # ⑤ 口径守卫：`scene_exposure_index` 必须等于 L_of_lin 那条链（改口径 ⇒ 规律整体偏掉）
+    for _L in (12.0, 25.33, 50.0, 78.0):
+        _g = np.zeros((20, 20, 3))
+        _g[..., :] = color.lin_of_L(_L)
+        _e = io.scene_exposure_index(_g)
+        _want = math.log2(float(color.lin_of_L(_L)) / 0.18)
+        check('曝光指数口径：L*%.2f → e=%+.4f（与 lab_pos_law_fit 逐字一致）' % (_L, _want),
+              abs(_e - _want) < 1e-9, '%.6f vs %.6f' % (_e, _want))
+
+    # ⑥ 兜底提亮让位：入口被规律定过 ⇒ L1 不许再提（否则同一个"位置"补两次）
+    class _S:                                     # 最小 sample 替身
+        kind, cam = 'raw', dict(idt_bias_ev=2.2, entry_settle='e=-3.4 DR400 → 落点 ×1.295')
+    _S2 = type('S2', (), {'kind': 'raw', 'cam': dict(idt_bias_ev=2.2)})  # 没被规律定过
+    check('兜底提亮：入口被"落点规律"定过 ⇒ 让位（返回 False）',
+          pipeline._allow_lift(_S, C, {'dark_lift': True}) is False)
+    check('兜底提亮：没被规律定过的图，行为不变（仍看 dark_lift）',
+          pipeline._allow_lift(_S2, C, {'dark_lift': True}) is True)
+
+    # ⑦ 接线守卫：装配点必须看开关（关掉 ENTRY_SETTLE_ENABLE 即回落 ENTRY_LEVEL）
+    _src = open(io.__file__, encoding='utf-8').read()
+    check('入口接线：装配点读的是 ENTRY_SETTLE_ENABLE（开关没被绕开）',
+          "getattr(C, 'ENTRY_SETTLE_ENABLE', False)" in _src
+          and 'cameras.entry_settle_level(' in _src)
+
+
 def main():
     for fn in (t_color, t_analyze, t_tone_mid_target, t_tone_monotone, t_style_lock,
                t_style_contrast_direction, t_style_tone_curve, t_style_chroma_ends, t_denoise,
                t_guard, t_lut,
                t_io_roundtrip, t_stocks, t_spatial_off, t_spatial_grain,
                t_spatial_bloom_halation, t_local_skin_floor, t_entry_bias, t_pipeline_smoke,
-               t_review_fixes):
+               t_review_fixes, t_entry_settle):
         fn()
     print('-' * 52)
     if FAIL:

@@ -133,7 +133,23 @@ def apply_entry_curve(lin, curve):
     return lin * np.interp(Y, xs, gs)[..., np.newaxis]
 
 
-def entry_tone(lin, ev, cfg=C):
+def scene_exposure_index(lin):
+    """场景曝光指数 `e = log2(场景线性亮度中位 / 0.18)`。
+
+    「这张图整体有多少档高于/低于 18% 灰」。与 `_debug/lab_pos_law_fit.py` 的口径逐字一致：
+    那边写的是 `L_of_lin(median(luma(lin)))` 再 `log2(lin_of_L(·)/0.18)`；因 `L_of_lin` 与
+    `lin_of_L` 互逆、且**单调变换与中位可交换** ⇒ 等于本式。**改口径会让规律偏掉**。
+
+    只为省时间对大图抽稀（中线数对抽稀不敏感）。
+    """
+    y = color.luma(np.clip(lin, 0.0, None))
+    if y.size > 3_000_000:
+        k = int(np.ceil(np.sqrt(y.size / 3_000_000.0)))
+        y = y[::k, ::k]
+    return float(np.log2(max(float(np.median(y)), 1e-9) / 0.18))
+
+
+def entry_tone(lin, ev, cfg=C, level=None):
     """入口成形（09-13 SV 拍板「乙」）：**场景线性光 + 一条固定的亮度/反差/肩部曲线**。
 
     与 `apply_entry_curve` 的分工：
@@ -141,13 +157,16 @@ def entry_tone(lin, ev, cfg=C):
         （实测把动态范围压掉 ~2.5 倍、2328 有 13% 像素被顶穿 1.0 ⇒ 高光砸成平板）。
       * 新：只做两件与口味无关的事 ——
           ① 零点：`× 2^ev`（ev = 实测 mid_ev，只补"相机故意欠曝"那几档）⇒ 近似**场景线性光**；
-          ② 形状：`y' = ENTRY_LEVEL · y^ENTRY_GAMMA` + **软肩部**（超过 ENTRY_KNEE 平滑压向 ENTRY_CEIL）。
+          ② 形状：`y' = a · y^ENTRY_GAMMA` + **软肩部**（超过 ENTRY_KNEE 平滑压向 ENTRY_CEIL）。
+
+    落点 `a`：默认 = 全局 `cfg.ENTRY_LEVEL`；**`level` 传了就用它** ——
+    「位置逐张听相机」（`cameras.entry_settle_level`）走的就是这条路，
+    把"全库一个落点"换成"逐张查机型×DR 实测规律"（见 cameras.py `SETTLE_LAW`）。
 
     仍然**只动亮度、不改色相**（三通道乘同一个"亮度→增益"，与 `apply_entry_curve` 同契约）。
-    全局只有 `ENTRY_LEVEL` 一个参数，**没有任何逐图旋钮** ⇒ 可迭代性不打折。
     """
     g = float(getattr(cfg, 'ENTRY_GAMMA', 1.0))
-    a = float(getattr(cfg, 'ENTRY_LEVEL', 1.0))
+    a = float(getattr(cfg, 'ENTRY_LEVEL', 1.0) if level is None else level)
     knee = float(getattr(cfg, 'ENTRY_KNEE', 1.0))
     ceil = float(getattr(cfg, 'ENTRY_CEIL', 1.0))
     Y = np.maximum(color.luma(np.clip(lin, 0.0, None)), 1e-9)
@@ -272,11 +291,28 @@ def load_raw(path, max_side=C.MAX_SIDE):
         # ★ 入口成形（09-13 SV 拍板「乙」）：零点(一个 EV) + 固定的亮度/反差/肩部曲线。
         #   不再复现机内 JPEG ⇒ 不会把"相机的机内风格 + 测光偏亮"一起搬进来（见 config.py）。
         #   对"没量过曲线的机身"也是同一条路（bias = 机型基底 + DR 查表）⇒ 全机型口径统一。
-        lin = entry_tone(lin, bias, C)
+        # ★ 位置逐张听相机（09-13 深夜）：落点 `a` 改由「机型×DR 实测落点规律」**逐张**定。
+        #   拿不到（机型没标定 / DR 不认 / e 算不出）⇒ 回落 ENTRY_LEVEL，**逐位同旧行为**。
+        a_settle = None
+        if getattr(C, 'ENTRY_SETTLE_ENABLE', False):
+            _e = scene_exposure_index(lin)
+            a_settle = cameras.entry_settle_level(model, dr, _e)
+            if a_settle is not None:
+                # 「往大师那头靠多少」= 全局偏移（档），默认 0 ⇒ 纯"位置听相机的"
+                _shift = float(getattr(C, 'ENTRY_SETTLE_SHIFT_EV', 0.0))
+                if abs(_shift) > 1e-9:
+                    a_settle *= 2.0 ** _shift
+                cam['entry_settle'] = 'e=%+.2f DR%s → 落点 ×%.3f' % (_e, dr, a_settle)
+                cam['entry_settle_e'] = _e
+                cam['entry_settle_shift_ev'] = _shift
+        lin = entry_tone(lin, bias, C, level=a_settle)
         # 报告用：此时曲线只贡献**零点**（形状已由固定成形负责），措辞别让人以为还在复现相机。
         cam['bias_source'] = cam.get('bias_source', '').replace('实测相机曲线', '实测零点')
-        cam['entry_shape'] = '胶片成形 γ%.3f L%.2f 肩%.2f→%.3f' % (
-            C.ENTRY_GAMMA, C.ENTRY_LEVEL, C.ENTRY_KNEE, C.ENTRY_CEIL)
+        cam['entry_shape'] = '胶片成形 γ%.3f %s 肩%.2f→%.3f' % (
+            C.ENTRY_GAMMA,
+            ('落点×%.3f(听相机)' % a_settle) if a_settle is not None
+            else ('落点%.2f(全局)' % C.ENTRY_LEVEL),
+            C.ENTRY_KNEE, C.ENTRY_CEIL)
     elif curve is not None:
         # 实测曲线 = 一条"亮度 → 增益"的曲线：三通道乘同一个增益 ⇒ 只动亮度、不改色相
         # （契约：曲线只在亮度域做）。按输入亮度查，暗部/中间调/高光各自有自己的倍数。

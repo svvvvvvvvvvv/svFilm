@@ -212,6 +212,66 @@ def dr_zero_evs(model=None):
     return {str(k): float(v['mid_ev']) for k, v in tab.items() if 'mid_ev' in v}
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ★★ 相机落点规律 —— 「位置逐张听相机」（09-13 深夜实测 + 拟合）
+# ══════════════════════════════════════════════════════════════════════════════
+# 病：入口只有一个**全局**落点 `config.ENTRY_LEVEL`。实测它把全库中灰挤在 L*29~41，
+#     而**相机自己跨 L*12~95** ⇒ 我们一直在推翻摄影师选定的曝光（把该暗的提亮、该亮的压暗）。
+#
+# 做法（`_debug/lab_pos_law_fit.py`；n=166 张 X-T30 III，覆盖 DR100/200/400）：
+#   逐张探 5 档入口电平 → 解出「最终中灰正好落在机内 JPEG 中灰上」所需的入口落点 a_target
+#   → 拟合 `log2(a_target)` 对 **场景曝光指数 e** 与 **DR 档**：
+#
+#       e = log2(RAW 线性亮度中位 / 0.18)          # 这张图"有多少档高于 18% 灰"
+#       a = 2 ** (alpha + beta·e + dr_off[dr])     # 乘在 `2^mid_ev` 之后的那个落点
+#
+# 成绩（5 折交叉验证，**留出集**，不是拟合内误差）：
+#   离机内 JPEG 中灰的距离（中位）：现行固定 0.55 **6.96 L*** → 本规律 **1.32 L***
+#   出片中灰的"铺开宽度"(P10~P90)：相机 32.4 ｜ 现行 27.5 ｜ 本规律 **33.6**
+#   ⇒ 不再把整库挤成一团，而是**跟着相机逐张铺开**。
+#   （只按 DR 给三个固定值的简化版留出集 1.51 ⇒ "逐张"这一项只值 0.2 L*，
+#     但它让规律在没数据的明暗区间能自适应外推，保留。）
+#
+# ⚠ 诚实边界（别把它讲过头）：
+#   ① 本样本里 **DR 档与明暗是缠在一起的**（DR100 组多在亮场景 e≈−0.2；DR200/400 组多在暗场景
+#      e≈−3.4）。所以 `dr_off` 只能当"运行时查表的偏移"，**不能当因果讲**
+#      （"DR400 本身要多给 1.1 档"这种话是错的）。运行时我们看到的就是 (e, DR) 这一对
+#      ⇒ 预测不受影响。
+#   ② DR400 组没有"亮场景"样本 ⇒ 那一档在亮光下靠 beta 外推。
+#   ③ **只标了 X-T30 III**。别的机身/DR 没规律 ⇒ 回落 `ENTRY_LEVEL`（行为与今天逐位一致）。
+SETTLE_LAW = {
+    'x-t30 iii': dict(
+        alpha=-0.5676,                 # DR100 的截距（= e=0 处 log2 落点）
+        beta=0.1494,                   # 逐张项：场景每亮/暗 1 档，落点跟着动 0.149 档
+        dr_off={100: 0.0, 200: 0.7130, 400: 1.4469},
+        n=166, cv_med_L=1.32,
+        src='_debug/lab_pos_law_fit.py',
+    ),
+}
+
+
+def entry_settle_level(model=None, dr=None, e=None):
+    """「相机落点规律」：给这张图定入口落点 `a`（乘在 `2^mid_ev` 之后）。
+
+    返回 float；**没标定的机型 / DR 不认 / 拿不到 e ⇒ 返回 None**（调用方回落
+    `config.ENTRY_LEVEL`，行为与今天逐位一致）。
+
+    `e` = `io.scene_exposure_index(lin)`（场景曝光指数 = log2(RAW 线性亮度中位/0.18)）。
+    """
+    t = SETTLE_LAW.get(str(model or '').strip().lower())
+    if not t or e is None or dr is None:
+        return None
+    off = t['dr_off'].get(int(dr))
+    if off is None:
+        return None
+    return float(2.0 ** (float(t['alpha']) + float(t['beta']) * float(e) + float(off)))
+
+
+def settle_law_models():
+    """标过「相机落点规律」的机型（给 selftest / 文档用）。"""
+    return sorted(SETTLE_LAW)
+
+
 def lookup(make=None, model=None):
     keys = []
     if make and model:
