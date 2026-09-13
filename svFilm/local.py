@@ -109,6 +109,22 @@ def skin_floor(disp, cfg=C):
     return out, info
 
 
+def _region_weight(sel, cfg):
+    r"""把选中的**脸区域**羽化成力道权重（和"正脸框那套"同构：σ = `FACE_FEATHER_REL` × 区域宽）。
+
+    为什么要它：形状那一下（A1 拉开明暗）要落在**脸这一块**上，硬边界会在脸上留下台阶。
+    老路径用 `face.parse` 给的"框羽化 × person"，新路径没有框 ⇒ 用选中的区域自己羽化。
+    返回 `None` 表示区域是空的（调用方退回直接用 `person_weight`）。
+    """
+    import cv2
+    if sel is None or not np.any(sel):
+        return None
+    _ys, xs = np.where(sel)
+    bw = float(xs.max() - xs.min() + 1)
+    sig = max(3.0, float(getattr(cfg, 'FACE_FEATHER_REL', 0.05)) * bw)
+    return np.clip(cv2.GaussianBlur(sel.astype(np.float32), (0, 0), sig), 0.0, 1.0)
+
+
 def face_tone(disp, cfg=C):
     r"""L3 的「脸」：① **位置**（只提人物，背景零改动）② **形状**（A1 放大已有的立体感）。
 
@@ -125,6 +141,15 @@ def face_tone(disp, cfg=C):
       ② 形状：以**脸自己的中位**为锚，把已有的明暗拉开 `k = 线/现状`（≤2.4 倍），**不编光**；
          线 = 鹿井「脸内部跨度（框内皮肤 P90−P10）」的 p25 = 35。变亮那部分最多到 L\*97（不动暗部）。
       ⚠ **顺序不可换**：形状的锚点（脸中位）必须在**位置定好之后**才取，否则锚点是错的。
+
+    ★ 「脸在哪」（09-14 SV 选「甲」）：两个动作用脸的**方式不一样**，这点容易混 ——
+      · **提亮** = 提**整个人**（力道落 `person_weight`，脸/手/衣服一起动）。脸在这里是**尺子**：
+        用"脸有多亮"代表"这个人有多亮"（用人的平均会被暗衣服、背影、背景漏进来的人边带偏）
+        ⇒ 脸只贡献**一个数**。
+      · **立体感** = **只落在脸上**（力道落 脸区域 × `person_weight`）。因为这是在脸上改**局部反差**，
+        圈到手臂就等于给胳膊编造光影 ⇒ 脸必须有**准确的位置**。
+      · 定位优先走 `face.face_region()`（**单独的脸皮肤类 + 头窗口**，不依赖正脸检测框，
+        正侧脸/背影/小脸都能拿到）；拿不到才回落老的正脸框路径。`info['how']` 记录用了哪条。
     """
     d = np.clip(disp, 0.0, 1.0)
     info = dict(applied=False)
@@ -136,23 +161,34 @@ def face_tone(disp, cfg=C):
     except face.FaceUnavailable as e:                      # 缺依赖/缺模型 ⇒ 优雅降级
         info.update(reason='no_dep', err=str(e))
         return d, info
-    f = st['face']
-    if f is None:
-        info['reason'] = 'no_face'
-        return d, info
     pw = st['person_weight']
     if pw is None or float(np.max(pw)) < 1e-3:
         info['reason'] = 'no_person'
         return d, info
+    f = st['face']
 
     lin = color.s2l(d)
     L = color.L_of_lin(color.Y_of(lin))
-    x0, y0, x1, y1 = f['box']
-    boxm = np.zeros(L.shape, bool)
-    boxm[y0:y1, x0:x1] = True
-    sel = boxm & (st['masks']['skin'] > 0.5)
-    if int(sel.sum()) < int(getattr(cfg, 'FACE_MIN_SKIN_PX', 200)):
-        sel = boxm
+    # ★★ 脸在哪（09-14 SV 选「甲」）：优先 **"脸皮肤 + 头窗口"** —— 不依赖正脸检测框。
+    #   正脸检测器对**正侧脸 / 背影 / 小脸**基本给不出框（1954 正侧脸机内 0 个候选；
+    #   0999 小脸被眼距闸挡掉，而它框里明明有 2025 个皮肤像素）。拿不到才回落老的"正脸框"
+    #   路径 ⇒ **绝不会比改动前更差**。详见 `face.face_region()`。
+    sel, how = face.face_region(st['masks'], cfg)
+    if sel is not None:
+        w_geo = _region_weight(sel, cfg)
+        w = pw if w_geo is None else (w_geo * pw)   # 再乘人物权重 ⇒ 背景处仍恒为 0
+    elif f is not None:
+        x0, y0, x1, y1 = f['box']
+        boxm = np.zeros(L.shape, bool)
+        boxm[y0:y1, x0:x1] = True
+        sel = boxm & (st['masks']['skin'] > 0.5)
+        if int(sel.sum()) < int(getattr(cfg, 'FACE_MIN_SKIN_PX', 200)):
+            sel = boxm
+        w = f['weight']
+        how = 'box'
+    else:
+        info['reason'] = 'no_face(%s)' % how
+        return d, info
     Lb = float(np.median(L[sel]))
 
     # ---- ① 位置：只提不压 ----
@@ -166,13 +202,12 @@ def face_tone(disp, cfg=C):
     k = float(np.clip(float(getattr(cfg, 'FACE_TGT_SPAN', 35.0)) / max(span, 1e-6),
                       1.0, float(getattr(cfg, 'FACE_SPAN_KMAX', 2.4))))
     if dL <= 1e-3 and k <= 1.0 + 1e-9:
-        info.update(reason='nothing_to_do', face_L=Lb, span=span, k=k, lift=0.0)
+        info.update(reason='nothing_to_do', face_L=Lb, span=span, k=k, lift=0.0, how=how)
         return d, info
     Ls = float(np.median(L1[sel]))
     cap = float(getattr(cfg, 'FACE_TOP_CAP', 97.0))
     Lx = Ls + k * (L1 - Ls)
     Lx = np.where(Lx > L1, np.minimum(Lx, np.maximum(L1, cap)), Lx)
-    w = f['weight']
     L2 = L1 + w * (Lx - L1)
     # ★ 只在有人物权重的像素上重调亮度 ⇒ 权重恒 0 的地方（**整个背景**）原样搬过来，
     #   连浮点残差都不留（否则 retone_L 会把"权重 0"的像素挪动 ~0.02 L*，肉眼不可见但不再是"一个像素不碰"）。
@@ -181,9 +216,9 @@ def face_tone(disp, cfg=C):
     wsel = pw > 1.0e-6
     if np.any(wsel):
         out[wsel] = color.retone_L(lin[wsel], L2[wsel])
-    info.update(applied=True, face_L_before=Lb, face_L=Ls, lift=dL,
+    info.update(applied=True, how=how, face_L_before=Lb, face_L=Ls, lift=dL,
                 span=span, k=k, person_cov=float(np.mean(pw)),
-                feather_cov=float(np.mean(f['weight'])))
+                feather_cov=float(np.mean(w)))
     return out, info
 
 
