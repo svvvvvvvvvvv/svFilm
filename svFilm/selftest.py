@@ -1208,13 +1208,76 @@ def t_face_layer():
           'FACE_TGT_SPAN' in fs and 'FACE_SPAN_KMAX' in fs and 'FACE_TGT_LRDIF' not in fs)
 
 
+def t_l4_caps():
+    r"""L4 那两道「不许超过」（09-14 SV 拍板）：**脸 ≤ 68**、**背景 ≤ 脸 − 17 = 51**。
+
+    设计主线（SV 原话）＝「先锚点人脸会好看的亮度，再去算背景该有的亮度」
+    ⇒ 脸是**锚**，背景**由脸推算**，两个都只是**上限**，只压不提。
+    """
+    import inspect
+    print('[L4 · 脸/背景 两道闸]')
+    cap_f = float(C.FACE_CAP_L)
+    cap_b = cap_f - float(C.BG_CAP_REL_L)
+    soft = float(C.CAP_SOFT_L)
+    src = inspect.getsource(guard.cap_face_bg)
+
+    # ① 出厂值与接线
+    check('脸上限 = 68（= 鹿井脸 L* 中位 67.9）', abs(cap_f - 68.0) < 1e-9, '%.1f' % cap_f)
+    check('背景上限 = 脸上限 − 17 = 51（不是独立靶，是**从脸算出来**的）',
+          abs(cap_b - 51.0) < 1e-9, '%.1f' % cap_b)
+    check('接线：两个上限都从 config 读（没写死在 guard 里）',
+          'FACE_CAP_L' in src and 'BG_CAP_REL_L' in src)
+    check('接线：开关读 CAP_FACE_BG_ENABLE；L4（guard.enforce）真的会走到它',
+          'CAP_FACE_BG_ENABLE' in src and 'cap_face_bg' in inspect.getsource(guard.enforce))
+
+    # ② `_soft_cap_L` 的数值行为 —— 这层真正的算法
+    L = np.array([20.0, 60.0, 68.0, 74.0, 90.0, 100.0])
+    sc = guard._soft_cap_L(L, cap_f, soft)
+    check('软压：低于上限的**一个都不动**（只压不提）', bool(np.allclose(sc[:2], L[:2])),
+          '%s' % np.round(sc[:2], 3))
+    check('软压：正好压在上限 ⇒ 不动（值与斜率都连续 ⇒ 压不出断层）',
+          abs(sc[2] - cap_f) < 1e-9, '%.4f' % sc[2])
+    check('软压：超上限的都被收回，且**没一刀切**（90 和 100 压完仍不一样）',
+          bool(sc[3] < L[3] and sc[4] < L[4] and sc[5] < L[5] and (sc[5] - sc[4]) > 1e-3),
+          '90→%.3f 100→%.3f' % (sc[4], sc[5]))
+    check('软压：再亮也到不了 上限+soft（是真上限，不是渐近无限的软塌）',
+          float(sc[-1]) <= cap_f + soft + 1e-9
+          and float(guard._soft_cap_L(np.array([1e6]), cap_f, soft)[0]) <= cap_f + soft,
+          '%.3f ≤ %.3f' % (sc[-1], cap_f + soft))
+    check('软压：单调不回头（压完还是越亮越亮）', bool(np.all(np.diff(sc) >= -1e-9)))
+
+    # ③ 合成图上真的生效（左半 = 脸·暗端，右半 = 背景·亮端）
+    H, W = 64, 256
+    g = np.linspace(0.0, 1.0, W, dtype=np.float32)
+    img = np.stack([np.repeat(g[None, :], H, 0)] * 3, -1)
+    mf = np.zeros((H, W), np.float32); mf[:, :W // 2] = 1.0
+    mb = np.zeros((H, W), np.float32); mb[:, W // 2:] = 1.0
+    out, info = guard.cap_face_bg(img, C, masks=dict(face_skin=mf, bg=mb))
+    Lb = color.L_of_lin(color.Y_of(color.s2l(np.clip(img, 0, 1))))
+    La = color.L_of_lin(color.Y_of(color.s2l(np.clip(out, 0, 1))))
+    face_dark = np.zeros((H, W), bool); face_dark[:, :int(W * 0.25)] = True
+    bg_hi = np.zeros((H, W), bool); bg_hi[:, int(W * 0.75):] = True
+    check('合成图·脸：本来就暗的**一个像素都没动**（只压不提）',
+          bool(np.allclose(La[face_dark], Lb[face_dark], atol=0.05)),
+          'Δ 最大 %.4f' % float(np.max(np.abs(La[face_dark] - Lb[face_dark]))))
+    check('合成图·背景：超上限的被压下去',
+          float(np.median(La[bg_hi])) < float(np.median(Lb[bg_hi])) - 1.0,
+          '%.2f → %.2f' % (float(np.median(Lb[bg_hi])), float(np.median(La[bg_hi]))))
+    check('合成图·背景：压完仍 ≤ 上限+soft', float(np.max(La[bg_hi])) <= cap_b + soft + 0.5,
+          'max %.2f ≤ %.2f' % (float(np.max(La[bg_hi])), cap_b + soft))
+    z = np.zeros((H, W), np.float32)
+    out0, info0 = guard.cap_face_bg(img, C, masks=dict(face_skin=z, bg=z))
+    check('掩膜为空 ⇒ 一个像素都不动（不做任何猜测）',
+          info0.get('applied') is False and bool(np.array_equal(out0, img)))
+
+
 def main():
     for fn in (t_color, t_analyze, t_tone_mid_target, t_tone_monotone, t_style_lock,
                t_style_contrast_direction, t_style_tone_curve, t_style_chroma_ends, t_denoise,
                t_guard, t_lut,
                t_io_roundtrip, t_stocks, t_spatial_off, t_spatial_grain,
                t_spatial_bloom_halation, t_local_skin_floor, t_entry_bias, t_pipeline_smoke,
-               t_review_fixes, t_entry_settle, t_entry_toe, t_face_layer):
+               t_review_fixes, t_entry_settle, t_entry_toe, t_face_layer, t_l4_caps):
         fn()
     print('-' * 52)
     if FAIL:
