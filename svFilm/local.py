@@ -1,9 +1,16 @@
 # -*- coding: utf-8 -*-
-"""L3 —— 局部层。默认只做一件事：肤色保护。
+"""L3 —— 局部层。默认做两件事，都只碰色度（不改明度）：
 
-风格层会把颜色往胶片方向收，肤色是最容易被收坏的地方。
-这里拿 L1 修正完的成片当参考，哪里是肤色、就把那里的色度按比例还给参考值。
-明度用当前的，色度用参考的 —— 只还"色"，不还"亮"。
+  ① 肤色保护 —— 风格层会把颜色往胶片方向收，肤色最容易被收坏。
+     拿 L1 修正完的成片当参考，哪里是肤色、就把那里的色度按比例还给参考值。
+     明度用当前的，色度用参考的 —— 只还"色"，不还"亮"。
+
+  ② 肤色正向达标 —— 只在"保护"补不回来时起作用（09-13 SV 拍板「全」档 + 过亮门）。
+     目标 = 大师脸区实测中位（a* 16.3 / b* 18.5，`_debug/analysis/skin_master_ruler.md`）。
+     **逐像素**：每个皮肤像素自己看"离目标还差多少"，差多少补多少；**只向上补**；
+     单像素位移设上限（a* 8 / b* 12，护唇妆/腮红）；**两轴都低才补**（某轴已高过目标
+     就完全不碰 —— 挡粉衣服/木色被顺手推暖）；过亮门**逐像素**收力
+     （L* ≤ 73.3 全强度 / ≥ 83.7 不补，逆光高调脸的高光部分自己不补、暗部照补）。
 
 （真正的大局：局部后面还会长柔化/颗粒/黑柔，那是空间域的活，
   用独立一层做，不塞进颜色层。）
@@ -26,19 +33,14 @@ def skin_mask(disp):
     return m
 
 
-def apply(ref_disp, disp, cfg=C):
-    """ref_disp = L1 修正后的成片；disp = 当前（过完风格）的成片。"""
-    if not cfg.SKIN_PROTECT or cfg.SKIN_PROTECT_STRENGTH <= 0.0:
-        return np.clip(disp, 0.0, 1.0), dict(skin_cov=0.0)
-
+def _protect(ref_disp, disp, cfg):
+    """肤色保护：色度按 SKIN_PROTECT_STRENGTH 往 L1 的参考值还。"""
     cur = np.clip(disp, 0.0, 1.0)
     ref = np.clip(ref_disp, 0.0, 1.0)
     m = skin_mask(cur)                     # 只这一次是全图 Lab
     cov = float(np.mean(m))
     if cov < 1e-4:
         return cur, dict(skin_cov=0.0)
-
-    # 只对掩膜覆盖到的像素做 Lab 往返（全图做要 3 趟，这里是 1 趟全图 + 2 趟稀疏）
     sel = m > 1e-3
     if not np.any(sel):
         return cur, dict(skin_cov=cov)
@@ -49,3 +51,63 @@ def apply(ref_disp, disp, cfg=C):
     out = cur.copy()
     out[sel] = np.clip(color.from_lab(lab_c), 0.0, 1.0)
     return out, dict(skin_cov=cov)
+
+
+def skin_floor(disp, cfg=C):
+    """肤色正向达标：**逐像素**把"低于大师脸的皮肤"抬到档上。只动色度。
+
+    每个皮肤像素自己算"离目标还差多少"，差多少补多少；三个门决定它使多大劲：
+      · 软掩膜 m           —— 越像皮肤越使劲；
+      · 过亮门（逐像素）    —— 亮度超过大师脸区分布上端就收力（逆光/高调脸不硬补）；
+      · 两轴都低门          —— 某一轴已经高过目标（粉衣服/木色/唇妆）就完全不碰。
+
+    ⚠ 不用"全图皮肤中位"这类整体统计量。试过，不行：掩膜会把粉衣服/木色/路面算进来
+    （实测一张 15.3% 的像素被判成皮肤），中位被拉低之后**人脸会被推过头**
+    （实测 b* 冲到 20.4，目标 18.5）。逐像素做就没有这个问题。
+    """
+    if not getattr(cfg, 'SKIN_FLOOR', False):
+        return np.clip(disp, 0.0, 1.0), dict(applied=False, reason='off')
+
+    d = np.clip(disp, 0.0, 1.0)
+    m = skin_mask(d)
+    if int((m > 0.5).sum()) < 200:
+        return d, dict(applied=False, reason='no_skin')
+    sel = m > 0.02
+
+    lab = color.to_lab(d[sel])
+    a, b, L = lab[:, 1], lab[:, 2], lab[:, 0]
+    aT, bT = cfg.SKIN_FLOOR_A, cfg.SKIN_FLOOR_B
+
+    gate_L = 1.0 - color.smoothstep(L, cfg.SKIN_FLOOR_L_LO, cfg.SKIN_FLOOR_L_HI)
+    excess = np.maximum(a - aT, b - bT)
+    both_low = 1.0 - color.smoothstep(excess, 0.0, cfg.SKIN_FLOOR_EXCESS)
+    w = m[sel] * gate_L * both_low
+
+    info = dict(applied=False, a_med=float(np.median(a)), b_med=float(np.median(b)),
+                L_med=float(np.median(L)), gate=float(np.mean(gate_L)),
+                touched=float(np.mean(w > 1e-3)))
+    if float(np.max(w)) < 1e-4:
+        info['reason'] = 'nothing_to_do'
+        return d, info
+
+    lab[:, 1] = a + np.clip(aT - a, 0.0, cfg.SKIN_FLOOR_A_MAX) * w
+    lab[:, 2] = b + np.clip(bT - b, 0.0, cfg.SKIN_FLOOR_B_MAX) * w
+    out = d.copy()
+    out[sel] = np.clip(color.from_lab(lab), 0.0, 1.0)
+    info['applied'] = True
+    return out, info
+
+
+def apply(ref_disp, disp, cfg=C):
+    """ref_disp = L1 修正后的成片；disp = 当前（过完风格 + 空间域）的成片。"""
+    out = np.clip(disp, 0.0, 1.0)
+    info = {}
+    if cfg.SKIN_PROTECT and cfg.SKIN_PROTECT_STRENGTH > 0.0:
+        out, pinfo = _protect(ref_disp, out, cfg)
+        info.update(pinfo)
+    else:
+        info['skin_cov'] = 0.0
+    if getattr(cfg, 'SKIN_FLOOR', False):
+        out, finfo = skin_floor(out, cfg)
+        info['skin_floor'] = finfo
+    return out, info

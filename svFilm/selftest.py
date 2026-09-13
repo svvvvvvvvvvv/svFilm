@@ -38,6 +38,9 @@ class _Cfg:
         # 抽色饱和（CHROMA_ENDS）也是"出厂模型默认"，同样要隔离：
         # 否则 "contrast=1.0 时完全不动" 会因为多跑一次 Lab 往返而红。
         self._d['CHROMA_ENDS'] = 0.0
+        # 肤色正向达标（L3 第二件事）也是"出厂默认"，同理隔离：
+        # 否则任何一张带肤色像素的测试图都会被它多推一次色度。
+        self._d['SKIN_FLOOR'] = False
         self._d.update(kw)
 
     def __getattr__(self, k):
@@ -391,6 +394,76 @@ def t_spatial_bloom_halation():
           '外圈 R/G/B %.5f/%.5f/%.5f' % (fr, fg, fb))
 
 
+def _skin_patch(a, b, L=62.0, size=64):
+    lab = np.zeros((size, size, 3), np.float64)
+    lab[..., 0] = L
+    lab[..., 1] = a
+    lab[..., 2] = b
+    return np.clip(color.from_lab(lab), 0.0, 1.0)
+
+
+def t_local_skin_floor():
+    print('[L3 肤色正向达标 + 逐像素门]')
+    p = _skin_patch(10.0, 8.0)
+    o, i = local.skin_floor(p, _Cfg(SKIN_FLOOR=False))
+    check('达标关掉 = 逐像素恒等', float(np.max(np.abs(o - p))) < 1e-12)
+
+    cfg = _Cfg(SKIN_FLOOR=True, SKIN_PROTECT_STRENGTH=0.0)
+    cold = _skin_patch(10.0, 8.0, 62.0)
+    o, i = local.skin_floor(cold, cfg)
+    lo = color.to_lab(o)
+    check('冷皮肤被抬到档上', i['applied'] is True, str(i.get('reason')))
+    check('a* 落在目标上', abs(float(np.median(lo[..., 1])) - cfg.SKIN_FLOOR_A) < 0.3,
+          'a*=%.2f' % float(np.median(lo[..., 1])))
+    check('b* 落在目标上', abs(float(np.median(lo[..., 2])) - cfg.SKIN_FLOOR_B) < 0.3,
+          'b*=%.2f' % float(np.median(lo[..., 2])))
+    check('明度不动', abs(float(np.median(lo[..., 0])) - 62.0) < 0.6,
+          'L*=%.2f' % float(np.median(lo[..., 0])))
+
+    warm = _skin_patch(16.5, 19.0, 62.0)
+    o2, i2 = local.skin_floor(warm, cfg)
+    check('已达标的皮肤一分不动', float(np.max(np.abs(o2 - warm))) < 1e-12, str(i2.get('reason')))
+
+    # 唇妆（a* 已经很高）：两个轴里 a* 超目标 ⇒ 完全不碰
+    lips = _skin_patch(10.0, 8.0, 62.0)
+    lips[:, :20] = _skin_patch(22.0, 12.0, 62.0)[:, :20]
+    o3, _ = local.skin_floor(lips, cfg)
+    lab3 = color.to_lab(o3)
+    check('唇妆不被推红', abs(float(np.median(lab3[:, :20, 1])) - 22.0) < 0.1,
+          'lip a*=%.2f' % float(np.median(lab3[:, :20, 1])))
+    check('同一张图里皮肤照补', float(np.median(lab3[:, 20:, 1])) > 15.0,
+          'skin a*=%.2f' % float(np.median(lab3[:, 20:, 1])))
+
+    # 粉衣服（a* 高于目标、b* 低于目标）：不该被"顺手推暖"
+    cloth = _skin_patch(10.0, 8.0, 62.0)
+    cloth[:32] = _skin_patch(21.0, 10.0, 62.0)[:32]
+    o4, _ = local.skin_floor(cloth, cfg)
+    lab4 = color.to_lab(o4)
+    check('粉衣服不被顺手推暖', float(np.max(np.abs(o4[:32] - cloth[:32]))) < 0.02,
+          'cloth b*=%.2f' % float(np.median(lab4[:32, :, 2])))
+
+    bright = _skin_patch(10.0, 8.0, 88.0)
+    o5, i5 = local.skin_floor(bright, cfg)
+    check('过亮脸门收力（gate≈0）', i5['gate'] < 0.02, 'gate=%.3f' % i5['gate'])
+    check('过亮脸基本不动', float(np.max(np.abs(o5 - bright))) < 0.02)
+
+    # 门是**逐像素**的：同一张脸里，亮的像素少补、暗的像素照补
+    ramp = _skin_patch(10.0, 8.0, 62.0, 64)
+    ramp[:32] = _skin_patch(10.0, 8.0, 80.0)[:32]
+    o6, i6 = local.skin_floor(ramp, cfg)
+    lab6 = color.to_lab(o6)
+    dk = float(np.median(lab6[32:, :, 1]))
+    br = float(np.median(lab6[:32, :, 1]))
+    check('逐像素门：暗的半边照补', dk > 15.0, 'dark a*=%.2f' % dk)
+    check('逐像素门：亮的半边少补', br < 13.0, 'bright a*=%.2f' % br)
+    check('逐像素门：门在 (0,1) 之间', 0.2 < i6['gate'] < 0.95, 'gate=%.3f' % i6['gate'])
+
+    d3, li = local.apply(cold, cold, cfg)
+    check('apply 汇报 skin_floor', 'skin_floor' in li)
+    d3b, lib = local.apply(cold, cold, _Cfg())
+    check('apply 关掉时不带 skin_floor', 'skin_floor' not in lib)
+
+
 def t_pipeline_smoke():
     print('[全链 smoke]')
     d = _gray_img(120, 180, gamma=0.4)
@@ -544,7 +617,7 @@ def main():
     for fn in (t_color, t_analyze, t_tone_mid_target, t_tone_monotone, t_style_lock,
                t_style_contrast_direction, t_style_chroma_ends, t_denoise, t_guard, t_lut,
                t_io_roundtrip, t_stocks, t_spatial_off, t_spatial_grain,
-               t_spatial_bloom_halation, t_entry_bias, t_pipeline_smoke):
+               t_spatial_bloom_halation, t_local_skin_floor, t_entry_bias, t_pipeline_smoke):
         fn()
     print('-' * 52)
     if FAIL:
