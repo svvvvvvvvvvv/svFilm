@@ -41,6 +41,10 @@ class _Cfg:
         # 肤色正向达标（L3 第二件事）也是"出厂默认"，同理隔离：
         # 否则任何一张带肤色像素的测试图都会被它多推一次色度。
         self._d['SKIN_FLOOR'] = False
+        # 胶片影调曲线（L2 的 A 档）也是"出厂默认"，同理隔离：
+        # 否则 "contrast=1.0 时完全不动" / "neutral 卷 = 恒等" 会因为中灰被抬而红。
+        # 要单独测它，显式传 _Cfg(TONE_CURVE=True, TONE_TOE=..., TONE_LIFT=...)。
+        self._d['TONE_CURVE'] = False
         self._d.update(kw)
 
     def __getattr__(self, k):
@@ -146,14 +150,28 @@ def t_tone_monotone():
 
 
 def t_style_lock():
+    """锁中灰：职责是「**颜色变换**不许偷偷改曝光」。
+
+    ⚠ 09-13 起 L2 多了一条**刻意**改影调的胶片曲线（`TONE_*`），所以这里要把曲线隔离掉 ——
+    否则测到的是"曲线 + 锁"的合成结果，不是锁本身。曲线抬中灰的行为由 `t_style_tone_curve` 守。
+    下面保留一条**接口回归**：曲线抬了中灰时，锁不能把它抵消掉。
+    """
     print('[L2 锁中灰]')
+    cfg = _Cfg(TONE_CURVE=False)
     d = _gray_img(gamma=0.9)
     ref = style.mid_of(d)
-    out, info = style.apply(d, C, lock_ref=ref)
-    check('风格层不动中灰', abs(style.mid_of(out) - ref) < 0.012,
+    out, info = style.apply(d, cfg, lock_ref=ref)
+    check('颜色变换不动中灰', abs(style.mid_of(out) - ref) < 0.012,
           '%.4f -> %.4f' % (ref, style.mid_of(out)))
-    out2, _ = style.apply(d, C, lock_ref=None)
+    out2, _ = style.apply(d, cfg, lock_ref=None)
     check('lock_ref=None 时不锁', True, 'ev=%.4f' % info['lock_ev'])
+
+    # ★ 接口回归：影调曲线抬了中灰 + 带锁 ⇒ 中灰必须真的抬起来（锁不抵消）
+    cur = _Cfg(TONE_CURVE=True, TONE_TOE=6.0, TONE_LIFT=6.0)
+    out3, info3 = style.apply(d, cur, lock_ref=ref)
+    check('曲线抬中灰时锁不抵消（lock_ev≈0 且中灰真的抬高）',
+          abs(info3['lock_ev']) < 0.03 and style.mid_of(out3) > ref + 0.005,
+          '%.4f -> %.4f (ev=%+.4f)' % (ref, style.mid_of(out3), info3['lock_ev']))
 
 
 def t_style_contrast_direction():
@@ -180,6 +198,68 @@ def t_style_contrast_direction():
 
     check('contrast=1.0 时完全不动',
           float(np.max(np.abs(style.apply(d, _Cfg(CONTRAST=1.0), lock_ref=None)[0] - d))) < 1e-9)
+
+
+def t_style_tone_curve():
+    """胶片影调曲线（L2 的 A 档）：趾部压深 + 中高调抬起，**黑白两端不动**。
+
+    最不能错的一条：曲线抬了中灰，LOCK_MID 的参照必须跟着曲线走 ——
+    否则锁会把刚抬起来的中灰原样拉回去（LIFT 白做）。下面有专门的回归。
+    """
+    print('[L2 胶片影调曲线]')
+    # ⚠ 必须用**严格中性**的斜坡：_gray_img 逐通道独立加噪，自己就带 a*/b* 抖动
+    #   （暗端尤其明显），拿它测"只动 L*"会误报。
+    ramp = _gray_img(gamma=1.0)
+    d = np.repeat(color.gray_of(ramp)[..., None], 3, axis=-1)
+
+    check('关掉 = 完全不动',
+          float(np.max(np.abs(style.apply(d, _Cfg(TONE_CURVE=False), lock_ref=None)[0] - d))) < 1e-9)
+
+    cfg = _Cfg(TONE_CURVE=True, TONE_TOE=6.0, TONE_LIFT=6.0)
+    g, y = style._tone_lut(6.0, 6.0)
+    check('曲线严格单调', bool(np.all(np.diff(y) > 0)))
+    check('黑端不动（L*=0 -> 0）', abs(float(y[0])) < 1e-9, '%.4f' % y[0])
+    check('白端不动（L*=100 -> 100）', abs(float(y[-1]) - 100.0) < 1e-9, '%.4f' % y[-1])
+    check('趾部：L*=10 被压深到 ~4', abs(float(np.interp(10.0, g, y)) - 4.0) < 0.4,
+          '%.2f' % float(np.interp(10.0, g, y)))
+    check('中高调：L*=70 被抬到 ~75.7', abs(float(np.interp(70.0, g, y)) - 75.7) < 0.4,
+          '%.2f' % float(np.interp(70.0, g, y)))
+    _sl_hi = (float(y[-1]) - float(np.interp(90.0, g, y))) / 10.0
+    check('高光端有肩部（90->100 段斜率 < 1）', _sl_hi < 0.90, 'slope=%.3f' % _sl_hi)
+
+    out, info = style.apply(d, cfg, lock_ref=None)
+    lab0, lab1 = color.to_lab(d), color.to_lab(out)
+    check('只动 L*（中性灰的 a*/b* 不动）',
+          float(np.max(np.abs(lab1[..., 1]))) < 1e-3 and float(np.max(np.abs(lab1[..., 2]))) < 1e-3,
+          'a*max=%.2e b*max=%.2e（Lab 往返噪声量级，远低于 1 个感知单位）'
+          % (float(np.max(np.abs(lab1[..., 1]))), float(np.max(np.abs(lab1[..., 2])))))
+    check('暗部真的更暗了', float(np.percentile(lab1[..., 0], 10)) <
+          float(np.percentile(lab0[..., 0], 10)) - 3.0,
+          'P10 %.1f -> %.1f' % (float(np.percentile(lab0[..., 0], 10)),
+                                float(np.percentile(lab1[..., 0], 10))))
+    check('中灰真的抬起来了', float(np.median(lab1[..., 0])) > float(np.median(lab0[..., 0])) + 2.0,
+          'P50 %.1f -> %.1f' % (float(np.median(lab0[..., 0])), float(np.median(lab1[..., 0]))))
+
+    # ★ 关键回归：带锁跑，中灰必须仍然按曲线走（不能被锁拉回）
+    ref = style.mid_of(d)
+    out_l, info_l = style.apply(d, cfg, lock_ref=ref)
+    L_in = float(np.median(color.to_lab(d)[..., 0]))
+    L_out = float(np.median(color.to_lab(out_l)[..., 0]))
+    L_expect = float(np.interp(L_in, g, y))
+    check('带锁跑时中灰仍按曲线走（锁不抵消 LIFT）', abs(L_out - L_expect) < 0.8,
+          '期望 %.2f，实得 %.2f' % (L_expect, L_out))
+    check('锁的增益被曲线参照抵消（lock_ev ≈ 0）', abs(info_l['lock_ev']) < 0.03,
+          'lock_ev=%.4f' % info_l['lock_ev'])
+
+    # 卷可以整组覆盖（给一个 tone_lift=0 的卷就退回"只有趾部"）
+    st = stocks.get('neutral')
+    st['color'] = dict(tone_curve=True, tone_toe=6.0, tone_lift=0.0)
+    out_c, _ = style.apply(d, _Cfg(TONE_CURVE=True, TONE_TOE=0.0, TONE_LIFT=0.0),
+                           lock_ref=None, stock=st)
+    check('卷能覆盖影调曲线（tone_lift=0 -> 中灰不抬）',
+          abs(float(np.median(color.to_lab(out_c)[..., 0])) - L_in) < 1.0,
+          'P50 %.1f -> %.1f' % (L_in, float(np.median(color.to_lab(out_c)[..., 0]))))
+    check('出厂默认影调曲线开着', bool(getattr(C, 'TONE_CURVE', False)))
 
 
 def _hp_std(x):
@@ -615,7 +695,8 @@ def t_entry_bias():
 
 def main():
     for fn in (t_color, t_analyze, t_tone_mid_target, t_tone_monotone, t_style_lock,
-               t_style_contrast_direction, t_style_chroma_ends, t_denoise, t_guard, t_lut,
+               t_style_contrast_direction, t_style_tone_curve, t_style_chroma_ends, t_denoise,
+               t_guard, t_lut,
                t_io_roundtrip, t_stocks, t_spatial_off, t_spatial_grain,
                t_spatial_bloom_halation, t_local_skin_floor, t_entry_bias, t_pipeline_smoke):
         fn()

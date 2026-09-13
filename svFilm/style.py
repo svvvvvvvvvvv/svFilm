@@ -85,14 +85,78 @@ def cube_apply(disp, cube):
 
 
 # ---------------- 内置颜色模型 ----------------
+# ★ 胶片影调曲线（09-13 SV 拍板「先做 A 影调」）：
+#   控制点里**黑(0) 与白(100) 都不动**，只做两件事 —— 趾部压深 + 中高调抬起；
+#   中灰抬起而白锚在 100 ⇒ 高光端自然形成肩部（"胶片高光滚降"而不是"刺白"）。
+#   定义域/值域都是 L*（0~100）。用 PCHIP 保证**严格单调**（折点会在天空那种平滑渐变里出色带）。
+#   形状依据与参数含义见 config.py 的 TONE_TOE / TONE_LIFT 注释。
+_TONE_CACHE = {}
+
+
+def _tone_pts(toe, lift):
+    xs = np.array([0.0, 10.0, 30.0, 50.0, 70.0, 90.0, 100.0])
+    ys = np.array([0.0,
+                   10.0 - toe,                 # 趾部：暗部相对中灰压深
+                   30.0 - toe * 0.45,
+                   50.0 + lift * 0.55,         # 中灰抬起
+                   70.0 + lift * 0.95,         # 中高调抬得最多
+                   90.0 + lift * 0.55,         # 白锚在 100 ⇒ 这一段斜率 <1 = 肩部
+                   100.0])
+    return xs, ys
+
+
+def _tone_lut(toe, lift):
+    """(tone_toe, tone_lift) -> (x_grid, y_grid)。1024 点，带缓存。"""
+    key = (round(float(toe), 4), round(float(lift), 4))
+    hit = _TONE_CACHE.get(key)
+    if hit is not None:
+        return hit
+    xs, ys = _tone_pts(float(toe), float(lift))
+    g = np.linspace(0.0, 100.0, 1024)
+    try:
+        from scipy.interpolate import PchipInterpolator
+        y = np.asarray(PchipInterpolator(xs, ys)(g), np.float64)
+    except Exception:                      # scipy 不在就退回折线（会有轻微折点，但不会崩）
+        y = np.interp(g, xs, ys)
+    y = np.clip(np.maximum.accumulate(y), 0.0, 100.0)      # 兜底：单调 + 有界
+    _TONE_CACHE[key] = (g, y)
+    return g, y
+
+
+def _tone_on(p):
+    if not p.get('tone_curve', False):
+        return False
+    return abs(float(p.get('tone_toe', 0.0) or 0.0)) > 1e-9 or \
+        abs(float(p.get('tone_lift', 0.0) or 0.0)) > 1e-9
+
+
+def tone_ref(disp_value, cfg=C, stock=None, base=None):
+    """把"锁中灰的参照"也过一遍影调曲线。
+
+    为什么必须这样：曲线抬了中灰，而 LOCK_MID 的职责是"把中灰拉回修正层交出来的那个值"。
+    若参照不过曲线，锁就会把曲线刚抬起来的中灰**原样拉回去**（LIFT 白做）。
+    单调变换下分位数可交换（median(T(L)) = T(median(L))），所以参照过完曲线之后，
+    锁算出来的增益恰好 ≈ 1 —— 锁退化成"只清颜色块造成的残余漂移"，正是它该干的事。
+    """
+    p = stocks.color_params(cfg, stock, base)
+    if not _tone_on(p):
+        return float(disp_value)
+    g, y = _tone_lut(p['tone_toe'], p['tone_lift'])
+    v = float(np.clip(disp_value, 0.0, 1.0))
+    lab = color.to_lab(np.full((1, 1, 3), v, np.float64))
+    lab[..., 0] = np.interp(lab[..., 0], g, y)
+    return float(np.clip(color.from_lab(lab)[0, 0, 0], 0.0, 1.0))
+
+
 def _builtin(disp, cfg, stock=None, base=None):
     """按"量出来的数"给颜色。一次 Lab 往返做完，顺序：
 
       ⓪ 线性域「雾」：黑位抬升（胶片黑不是死黑）—— 基准成色专属，卷不设
       ① 线性域 3x3（负片交调，默认恒等）
-      ② 色偏：整体 a*/b* + 按亮度分裂的 b*（暗部/亮部分开，对齐大师那把尺子）
-      ③ 彩度：C' = s·Cref·(C/Cref)^p —— 两个自由度正好对上"彩度中位"和"彩度P90"两个靶
-      ④ 明度对比（只动 L*，a/b 不动 → 对比不脏色）
+      ② ★ 胶片影调曲线（只动 L*）—— 先定影调，后面按新的 L* 上色
+      ③ 色偏：整体 a*/b* + 按亮度分裂的 b*（暗部/亮部分开，对齐大师那把尺子）
+      ④ 彩度：C' = s·Cref·(C/Cref)^p —— 两个自由度正好对上"彩度中位"和"彩度P90"两个靶
+      ⑤ 明度对比（只动 L*，a/b 不动 → 对比不脏色）
 
     参数 = cfg 默认 → 基准成色（中性路径对齐大师平均）→ 卷（相对大师平均的性格偏移）。
     色偏在纯黑纯白两端淡出：纯黑不该有颜色，纯白也不该被染色（否则高光被染脏、还容易削顶）。
@@ -109,16 +173,22 @@ def _builtin(disp, cfg, stock=None, base=None):
         lin = lin @ M.T
     out = np.clip(color.l2s(np.clip(lin, 0.0, None)), 0.0, 1.0)
 
+    has_tone = _tone_on(p)
     has_tint = (abs(p['a']) + abs(p['b']) + abs(p['b_sh']) + abs(p['b_hi'])) > 1e-6
     has_chroma = abs(p['chroma_p'] - 1.0) > 1e-6 or abs(p['chroma_s'] - 1.0) > 1e-6
     _ce = float(p.get('chroma_ends', 0.0) or 0.0)      # 抽色饱和（两端掉彩）
     has_chroma = has_chroma or _ce > 0.0
     has_contrast = abs(p['contrast'] - 1.0) > 1e-6
-    if not (has_tint or has_chroma or has_contrast):
+    if not (has_tone or has_tint or has_chroma or has_contrast):
         return np.clip(out, 0.0, 1.0)
 
     lab = color.to_lab(out)
     L = lab[..., 0]
+
+    if has_tone:
+        _g, _y = _tone_lut(p['tone_toe'], p['tone_lift'])
+        L = np.interp(L, _g, _y)
+        lab[..., 0] = L
 
     if has_tint:
         w = color.smoothstep(L, p['tint_lo'], p['tint_hi'])            # 0 = 暗部, 1 = 亮部
@@ -188,7 +258,11 @@ def apply(disp, cfg=C, lut=None, lock_ref=None, stock=None, base=None):
                 stock=(stock or {}).get('name'),
                 base=stocks.resolve_base(cfg, base)['name'])
     if cfg.LOCK_MID and lock_ref is not None:
-        out, ev = lock_mid(out, lock_ref)
+        # ★ 参照也要过影调曲线 —— 否则锁会把曲线刚抬起来的中灰原样拉回去（LIFT 白做）。
+        #   单调变换下 median(T(L)) = T(median(L))，所以过完曲线之后锁的增益恰好 ≈1，
+        #   只清掉颜色块造成的残余漂移。
+        ref = tone_ref(lock_ref, cfg, stock, base)
+        out, ev = lock_mid(out, ref)
         info['lock_ev'] = ev
     return np.clip(out, 0.0, 1.0), info
 
