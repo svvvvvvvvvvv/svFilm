@@ -56,9 +56,11 @@ def build_curve(rep, cfg=C, allow_lift=False):
     #   其余（below 的兜底提亮）-> 落到 TGT_MID（大师中位的那个灰）。
     if rep.get('decision') == 'compress':
         Tm = float(color.s2l(getattr(cfg, 'GUARD_MID', cfg.TGT_MID)))
+        # 白点的上限也走"过曝专属"那一档，见下面 tw_out 的注释（09-13 SV 拍板「开顶」）。
+        Tw = float(color.s2l(getattr(cfg, 'WHITE_CEIL', cfg.TGT_WHITE)))
     else:
         Tm = float(color.s2l(cfg.TGT_MID))
-    Tw = float(color.s2l(cfg.TGT_WHITE))
+        Tw = float(color.s2l(cfg.TGT_WHITE))
 
     # ---- 输入位置（log2） ----
     tb_in, t25_in, tm_in, tk_in, tw_in = _t(yb), _t(y25), _t(ym), _t(yk), _t(yw)
@@ -77,7 +79,17 @@ def build_curve(rep, cfg=C, allow_lift=False):
     #              ② 绝不反过来把黑提亮（否则纯黑像素会顶到 1% 灰，暗部出现台阶）
     tb_out = min(tb_in, max(_t(Tb), tb_in - cfg.BLACK_PULL))
 
-    tw_out = _t(Tw)
+    # ---- 白点：也分两条路（与中灰同一个道理；「必须等于」是护栏层最贵的错误） ----
+    # compress（真的过曝）：**只设上限** `WHITE_CEIL`（灰阶 245），不再"必须等于灰阶 220"。
+    #   为什么这条路放开是安全的：过曝片的输入白点本来就 >= 落点 ⇒ 放开只可能"少压一点"，
+    #   **永远不会放大颜色** —— 而"落点高于输入白点会把高光连色一起放大 3.4 倍"正是当年
+    #   把落点定在 220 的原因。⇒ 09-13 SV 拍板的「开顶」：过曝片的高光不再被挤成 218~220 的平板。
+    #   `max(..., tm_out)` 是单调性兜底：上限再低也不许压到中灰以下。
+    # 其余（兜底提亮）：白点的输入常常远低于落点，落点必须守 TGT_WHITE，否则高光连色一起放大。
+    if rep.get('decision') == 'compress':
+        tw_out = max(min(tw_in, _t(Tw)), tm_out)
+    else:
+        tw_out = _t(Tw)
 
     def line_bm(y):
         """黑点 -> 中灰 的直线（log2 域），给阴影填充当参照"""

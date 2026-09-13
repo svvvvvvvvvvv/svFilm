@@ -128,9 +128,24 @@ def t_tone_mid_target():
         check('中灰落到护栏线（不是拽到 0.55）', abs(gm - C.GUARD_MID) < 0.02,
               '%.4f vs 护栏 %.4f（TGT_MID %.4f）' % (gm, C.GUARD_MID, C.TGT_MID))
         gw = float(np.percentile(color.gray_of(out), C.PCT_WHITE))
-        check('白点落到靶 ±0.02', abs(gw - C.TGT_WHITE) < 0.02, '%.4f vs %.4f' % (gw, C.TGT_WHITE))
+        # ★ 09-13「开顶」：过曝路径的白点落点从 TGT_WHITE（灰阶 220）改成**上限** WHITE_CEIL（245）。
+        #   中灰同时被收到 GUARD_MID（灰阶 218）⇒ 旧写法等于把最亮一截挤成 218~220 的平板。
+        check('★ 开顶：过曝片白点落在上限 WHITE_CEIL（不再被拽到灰阶 220）',
+              abs(gw - C.WHITE_CEIL) < 0.02 and gw > C.TGT_WHITE + 0.05,
+              '%.4f vs 上限 %.4f（旧靶 %.4f）' % (gw, C.WHITE_CEIL, C.TGT_WHITE))
     check('无 NaN/Inf', np.all(np.isfinite(lin)))
     check('取值在 0~1', lin.min() >= -1e-9 and lin.max() <= 1.0 + 1e-9)
+
+    # ★ 开顶**不许越界**：兜底提亮那条路的白点输入常远低于落点，放开等于把高光连色一起放大，
+    #   所以那条路必须继续守 TGT_WHITE。
+    d3 = _gray_img(gamma=2.2)                       # 偏暗 -> decision == 'below'
+    rep3 = analyze.analyze(_lin_from_disp(d3), d3, 'jpg')
+    lin3, info3 = tone.correct(_lin_from_disp(d3), rep3, C, allow_lift=True)
+    check('开顶只对过曝路径生效（这张判成 below）', rep3['decision'] == 'below', rep3['decision'])
+    if info3['applied']:
+        gw3 = float(np.percentile(color.gray_of(np.clip(color.l2s(lin3), 0, 1)), C.PCT_WHITE))
+        check('兜底提亮路径的白点仍守 TGT_WHITE（没被开顶带偏）',
+              abs(gw3 - C.TGT_WHITE) < 0.03, '%.4f vs %.4f' % (gw3, C.TGT_WHITE))
 
 
 def t_tone_monotone():
