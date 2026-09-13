@@ -219,7 +219,7 @@ def face_tone(disp, cfg=C):
     if bool(getattr(cfg, 'FACE_DIR_MEASURE', True)):
         try:
             asym, n_pair, dir_how = face.lr_asym(
-                L1, st['masks']['skin'], sel,
+                L1, st['masks']['face_skin'], sel,          # ★ 传"脸皮肤"那一类，别传 skin（skin = 脸+身体）
                 lm=(f or {}).get('lm'), box=(f or {}).get('box'),
                 eyed=(f or {}).get('eyed'), cfg=cfg)
         except Exception:                                       # noqa: BLE001
