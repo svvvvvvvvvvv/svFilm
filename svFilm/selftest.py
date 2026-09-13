@@ -44,7 +44,7 @@ class _Cfg:
         # 胶片影调曲线（L2 的 A 档）也是"出厂默认"，同理隔离：
         # 否则 "contrast=1.0 时完全不动" / "neutral 卷 = 恒等" 会因为中灰被抬而红。
         # 要单独测它，显式传 _Cfg(TONE_CURVE=True, TONE_TOE=..., TONE_LIFT=...)。
-        # ⚠ 肩部（TONE_SHOULDER）出厂默认=4（09-13 SV 定档），**也必须隔离**：
+        # ⚠ 肩部（TONE_SHOULDER）出厂默认=2（09-13 深夜 SV 定「B 档」，由 4 放开），**也必须隔离**：
         #   否则凡是"拿 _tone_lut(...) 算期望值再和 style.apply 比"的用例都会错位。
         self._d['TONE_CURVE'] = False
         self._d['TONE_SHOULDER'] = 0.0
@@ -280,14 +280,18 @@ def t_style_tone_curve():
     check('出厂默认影调曲线开着', bool(getattr(C, 'TONE_CURVE', False)))
 
     # ---- ★ 肩部（TONE_SHOULDER）：高光段整段下收 ----
-    # 出厂默认现在是 4.0（09-13 晚 SV 拍板「② 轻档」）；下面一律显式传 0 当"老行为"基准。
-    print('[★ 肩部 TONE_SHOULDER：收高光（09-13 晚 SV 拍板「轻=4」）]')
+    # 出厂默认现在是 2.0（09-13 深夜 SV 拍板「B 档」，由 4 放开 —— 见 config 注释与手册 §21.3）；
+    # 下面一律显式传 0 当"老行为"基准，机理检查用 SH=8 的独立档，与默认值解耦。
+    print('[★ 肩部 TONE_SHOULDER：收高光（09-13 深夜 SV 拍板「B = 2」）]')
     g0, y0 = style._tone_lut(1.0, 9.0, 0.0)
     _gz, yz = style._tone_lut(1.0, 9.0, 0.0)
     check('肩部 0 = 逐位等于老行为', float(np.max(np.abs(y0 - yz))) < 1e-12)
-    check('出厂默认 TONE_SHOULDER = 4.0（轻档）',
-          abs(float(getattr(C, 'TONE_SHOULDER', 0.0)) - 4.0) < 1e-9,
+    check('出厂默认 TONE_SHOULDER = 2.0（B 档：白点上限 L*98，贴大师 L99 97.0）',
+          abs(float(getattr(C, 'TONE_SHOULDER', 0.0)) - 2.0) < 1e-9,
           '%.1f' % float(getattr(C, 'TONE_SHOULDER', 0.0)))
+    check('默认档的白点上限落在 L*98（不再被钉在 96）',
+          abs(float(style._tone_lut(1.0, 9.0, 2.0)[1][-1]) - 98.0) < 1e-6,
+          '%.3f' % style._tone_lut(1.0, 9.0, 2.0)[1][-1])
 
     SH = 8.0
     gs, ys = style._tone_lut(1.0, 9.0, SH)
