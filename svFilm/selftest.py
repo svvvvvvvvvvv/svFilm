@@ -945,12 +945,14 @@ def t_review_fixes():
                   abs((z['400'] - z['100']) - 2.0) < 0.25, '%.3f' % (z['400'] - z['100']))
         if '100' in z and '200' in z:
             _step = z['200'] - z['100']
+            # ★ 09-13 深夜复测（n=305，`_debug/lab_dr_relift.py`，配对源 = RAF 内嵌机内 JPEG）：
+            #   **相机成片的真实步进就是 ≈ +1.84**（DR200 抬得几乎和 DR400 一样多），
+            #   不是物理上的 +1 ⇒ **别再把它当数据缺陷**。见 cameras.py 的复核结论。
             _known = (_model, '200') in cameras.FUJI_DR_STEP_KNOWN_BAD
-            _ok = abs(_step - 1.0) < 0.25
-            check('P1-6 %s：DR100→DR200 步进 = +1EV（已知缺陷须登记）' % _model,
-                  _ok or _known, 'step=%+.2f 已登记=%s' % (_step, _known))
-            check('P1-6 %s/DR200 的已知缺陷若已修好 ⇒ 请从 KNOWN_BAD 删掉' % _model,
-                  not (_known and _ok), 'step=%+.2f' % _step)
+            check('P1-6 %s：DR100→DR200 步进 ≈ +1.84EV（实测相机成片行为，不是缺陷）' % _model,
+                  abs(_step - 1.84) < 0.25 or _known, 'step=%+.2f' % _step)
+            check('P1-6 %s：DR200 的 +1.84 是相机行为 ⇒ KNOWN_BAD 必须为空' % _model,
+                  not _known, 'step=%+.2f 仍登记为缺陷=%s' % (_step, _known))
 
     # ---------- P2-9：入口护栏有 k 地板 ----------
     _blown = np.ones((48, 56, 3))
