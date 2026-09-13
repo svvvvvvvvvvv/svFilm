@@ -849,12 +849,21 @@ def t_entry_bias():
           abs(float(np.percentile(color.gray_of(np.clip(color.l2s(out_dk), 0, 1)), C.PCT_WHITE))
               - C.TGT_WHITE) < 0.03)
     # 极暗图 -> 撞上限（"设上限防冲过头"）
-    d_x = _gray_img(gamma=2.6)
-    rep_x = analyze.analyze(_lin_from_disp(d_x), d_x, 'raw')
-    _, info_x = tone.correct(_lin_from_disp(d_x), rep_x, C, allow_lift=True)
+    # ★ 用例**必须随上限自适应**：上限一放宽，原来那张"极暗图"会先够到落点（LIFT_DARK_FLOOR_L）
+    #   而根本撞不到顶 ⇒ `capped` 变 False，用例自己失效（09-13 把上限 1.6→2.6 时就这么挂过）。
+    #   这里从深到浅扫一档 gamma，取第一个"撞顶"的。
+    hit = None
+    for _g in (8.0, 6.5, 5.5, 4.5, 3.6, 3.0, 2.6):
+        d_x = _gray_img(gamma=_g)
+        rep_x = analyze.analyze(_lin_from_disp(d_x), d_x, 'raw')
+        _, info_x = tone.correct(_lin_from_disp(d_x), rep_x, C, allow_lift=True)
+        if info_x['capped']:
+            hit = (_g, info_x)
+            break
     check('★ 提亮有上限（极暗图 ≤ LIFT_DARK_CAP_EV 档）',
-          info_x['ev_mid'] <= C.LIFT_DARK_CAP_EV + 1e-6 and info_x['capped'],
-          'ev%+.2f vs 上限 %.2f' % (info_x['ev_mid'], C.LIFT_DARK_CAP_EV))
+          hit is not None and hit[1]['ev_mid'] <= C.LIFT_DARK_CAP_EV + 1e-6,
+          ('gamma%.1f ev%+.2f vs 上限 %.2f' % (hit[0], hit[1]['ev_mid'], C.LIFT_DARK_CAP_EV))
+          if hit else 'gamma 扫到 8.0 都没撞顶 —— 上限是不是被放得太大了？')
 
     # 端到端：同一张偏暗图，allow_lift False 时像素不动
     d = _gray_img(gamma=0.9)
