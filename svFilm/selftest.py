@@ -44,7 +44,10 @@ class _Cfg:
         # 胶片影调曲线（L2 的 A 档）也是"出厂默认"，同理隔离：
         # 否则 "contrast=1.0 时完全不动" / "neutral 卷 = 恒等" 会因为中灰被抬而红。
         # 要单独测它，显式传 _Cfg(TONE_CURVE=True, TONE_TOE=..., TONE_LIFT=...)。
+        # ⚠ 肩部（TONE_SHOULDER）出厂默认=4（09-13 SV 定档），**也必须隔离**：
+        #   否则凡是"拿 _tone_lut(...) 算期望值再和 style.apply 比"的用例都会错位。
         self._d['TONE_CURVE'] = False
+        self._d['TONE_SHOULDER'] = 0.0
         self._d.update(kw)
 
     def __getattr__(self, k):
@@ -275,6 +278,62 @@ def t_style_tone_curve():
           abs(float(np.median(color.to_lab(out_c)[..., 0])) - L_in) < 1.0,
           'P50 %.1f -> %.1f' % (L_in, float(np.median(color.to_lab(out_c)[..., 0]))))
     check('出厂默认影调曲线开着', bool(getattr(C, 'TONE_CURVE', False)))
+
+    # ---- ★ 肩部（TONE_SHOULDER）：高光段整段下收 ----
+    # 出厂默认现在是 4.0（09-13 晚 SV 拍板「② 轻档」）；下面一律显式传 0 当"老行为"基准。
+    print('[★ 肩部 TONE_SHOULDER：收高光（09-13 晚 SV 拍板「轻=4」）]')
+    g0, y0 = style._tone_lut(1.0, 9.0, 0.0)
+    _gz, yz = style._tone_lut(1.0, 9.0, 0.0)
+    check('肩部 0 = 逐位等于老行为', float(np.max(np.abs(y0 - yz))) < 1e-12)
+    check('出厂默认 TONE_SHOULDER = 4.0（轻档）',
+          abs(float(getattr(C, 'TONE_SHOULDER', 0.0)) - 4.0) < 1e-9,
+          '%.1f' % float(getattr(C, 'TONE_SHOULDER', 0.0)))
+
+    SH = 8.0
+    gs, ys = style._tone_lut(1.0, 9.0, SH)
+    check('白端被下收（L*=100 -> 100-sh）', abs(float(ys[-1]) - (100.0 - SH)) < 1e-6,
+          '%.3f' % ys[-1])
+    sl0 = (y0[-1] - float(np.interp(90.0, g0, y0))) / 10.0
+    sls = (ys[-1] - float(np.interp(90.0, gs, ys))) / 10.0
+    check('高光段斜率收小（肩部真的更"滚"）', sls < sl0 - 0.05,
+          '%.3f -> %.3f' % (sl0, sls))
+    check('黑端 / 趾部不受肩部影响',
+          abs(float(np.interp(10.0, gs, ys)) - float(np.interp(10.0, g0, y0))) < 0.45,
+          '%.2f' % abs(float(np.interp(10.0, gs, ys)) - float(np.interp(10.0, g0, y0))))
+    check('中灰基本不动（只收高光）',
+          abs(float(np.interp(50.0, gs, ys)) - float(np.interp(50.0, g0, y0))) < 0.6,
+          '%.2f' % abs(float(np.interp(50.0, gs, ys)) - float(np.interp(50.0, g0, y0))))
+    check('加肩部后仍严格单调（不出平板）', bool(np.all(np.diff(ys) > 0)))
+
+    # 反例守卫：**只压白点**会塌成平板 ⇒ 必须整段收（这是设计决定，别被"简化"掉）
+    from scipy.interpolate import PchipInterpolator as _PI
+    _xp = np.array([0.0, 10.0, 30.0, 50.0, 70.0, 90.0, 100.0])
+    _yp = np.array([0.0, 9.0, 29.55, 54.95, 78.55, 94.95, 92.0])   # 只把最后一格往下挪
+    _gg = np.linspace(0.0, 100.0, 1024)
+    _yy = np.clip(np.maximum.accumulate(_PI(_xp, _yp)(_gg)), 0.0, 100.0)
+    _flat = (float(_yy[-1]) - float(np.interp(90.0, _gg, _yy))) / 10.0
+    check('反例：只压白点 = 平板（斜率≈0）⇒ 肩部必须整段收', _flat < 0.15, 'slope=%.3f' % _flat)
+
+    # 卷可覆盖（各卷能有自己的肩部性格）
+    st2 = stocks.get('neutral')
+    st2['color'] = dict(tone_curve=True, tone_toe=1.0, tone_lift=9.0, tone_shoulder=SH)
+    out_s, _ = style.apply(d, _Cfg(TONE_CURVE=True, TONE_TOE=1.0, TONE_LIFT=9.0,
+                                   TONE_SHOULDER=0.0), lock_ref=None, stock=st2)
+    L_in_s = float(np.median(color.to_lab(d)[..., 0]))
+    L_out_s = float(np.median(color.to_lab(out_s)[..., 0]))
+    check('卷能覆盖肩部（tone_shoulder 生效）',
+          abs(L_out_s - float(np.interp(L_in_s, gs, ys))) < 1.0,
+          '期望 %.2f，实得 %.2f' % (float(np.interp(L_in_s, gs, ys)), L_out_s))
+
+    out_off = style.apply(d, _Cfg(TONE_CURVE=True, TONE_TOE=1.0, TONE_LIFT=9.0,
+                                  TONE_SHOULDER=0.0), lock_ref=None)[0]
+    out_sh = style.apply(d, _Cfg(TONE_CURVE=True, TONE_TOE=1.0, TONE_LIFT=9.0,
+                                 TONE_SHOULDER=SH), lock_ref=None)[0]
+    check('成片层面：高光更暗（P95 降）',
+          float(np.percentile(color.to_lab(out_sh)[..., 0], 95)) <
+          float(np.percentile(color.to_lab(out_off)[..., 0], 95)) - 1.0,
+          'P95 %.1f -> %.1f' % (float(np.percentile(color.to_lab(out_off)[..., 0], 95)),
+                                float(np.percentile(color.to_lab(out_sh)[..., 0], 95))))
 
 
 def _hp_std(x):

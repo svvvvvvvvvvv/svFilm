@@ -53,18 +53,19 @@ _ID = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
 #   contrast    明度对比（只动 L*）    ← 尺子：反差 span90
 def _c(a=0.0, b=0.0, b_sh=0.0, b_hi=0.0, chroma_p=1.0, chroma_s=1.0, chroma_ref=20.0,
        contrast=1.0, tint_lo=25.0, tint_hi=90.0, matrix=None, chroma_ends=None,
-       tone_curve=None, tone_toe=None, tone_lift=None):
+       tone_curve=None, tone_toe=None, tone_lift=None, tone_shoulder=None):
     """`chroma_ends` = 抽色饱和（两端掉彩量）。None = 继承 config.CHROMA_ENDS；
     显式给 0.0 = 关（`neutral` 靠它保持恒等）。
 
-    `tone_curve` / `tone_toe` / `tone_lift` = 胶片影调曲线（见 config.TONE_*）。
+    `tone_curve` / `tone_toe` / `tone_lift` / `tone_shoulder` = 胶片影调曲线（见 config.TONE_*）。
     None = 继承 config；显式给值 = 这一卷自己的影调性格（`neutral` 显式关掉以保恒等）。
     """
     return dict(matrix=(matrix or _ID), a=a, b=b, b_sh=b_sh, b_hi=b_hi,
                 chroma_p=chroma_p, chroma_s=chroma_s, chroma_ref=chroma_ref,
                 contrast=contrast, tint_lo=tint_lo, tint_hi=tint_hi,
                 chroma_ends=chroma_ends,
-                tone_curve=tone_curve, tone_toe=tone_toe, tone_lift=tone_lift)
+                tone_curve=tone_curve, tone_toe=tone_toe, tone_lift=tone_lift,
+                tone_shoulder=tone_shoulder)
 
 
 def _s(grain=None, bloom=None, halation=None):
@@ -281,6 +282,7 @@ def color_params(cfg, stock, base=None):
              tone_curve=bool(getattr(cfg, 'TONE_CURVE', False)),
              tone_toe=float(getattr(cfg, 'TONE_TOE', 0.0) or 0.0),
              tone_lift=float(getattr(cfg, 'TONE_LIFT', 0.0) or 0.0),
+             tone_shoulder=float(getattr(cfg, 'TONE_SHOULDER', 0.0) or 0.0),
              fog=b['b_fog'])
     if stock:
         c = stock.get('color') or {}
@@ -292,7 +294,7 @@ def color_params(cfg, stock, base=None):
         # 影调曲线：卷可整组覆盖（给 None 就是"这一卷不要影调曲线"）
         if c.get('tone_curve') is not None:
             p['tone_curve'] = bool(c['tone_curve'])
-        for k in ('tone_toe', 'tone_lift'):
+        for k in ('tone_toe', 'tone_lift', 'tone_shoulder'):
             if c.get(k) is not None:
                 p[k] = float(c[k])
         for k in ('a', 'b', 'b_sh', 'b_hi'):

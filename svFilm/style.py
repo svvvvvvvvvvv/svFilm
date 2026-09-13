@@ -93,25 +93,31 @@ def cube_apply(disp, cube):
 _TONE_CACHE = {}
 
 
-def _tone_pts(toe, lift):
+def _tone_pts(toe, lift, shoulder=0.0):
+    """曲线控制点。`shoulder` = 高光段**整段**下收量（L*，见 config.TONE_SHOULDER）。
+
+    ⚠ 必须整段收（70/90/100 一起），**不能只压白点** —— 只压 100 会让 90→100 塌成平板
+      （实测斜率掉到 0 = 顶上一截全是死白，没有层次）。
+    """
     xs = np.array([0.0, 10.0, 30.0, 50.0, 70.0, 90.0, 100.0])
+    sh = float(shoulder)
     ys = np.array([0.0,
                    10.0 - toe,                 # 趾部：暗部相对中灰压深
                    30.0 - toe * 0.45,
                    50.0 + lift * 0.55,         # 中灰抬起
-                   70.0 + lift * 0.95,         # 中高调抬得最多
-                   90.0 + lift * 0.55,         # 白锚在 100 ⇒ 这一段斜率 <1 = 肩部
-                   100.0])
+                   70.0 + lift * 0.95 - sh * 0.30,   # ↓ 肩部：越靠顶收得越多
+                   90.0 + lift * 0.55 - sh * 0.70,
+                   100.0 - sh])                # 白端（这是"白锚"第一次可动）
     return xs, ys
 
 
-def _tone_lut(toe, lift):
-    """(tone_toe, tone_lift) -> (x_grid, y_grid)。1024 点，带缓存。"""
-    key = (round(float(toe), 4), round(float(lift), 4))
+def _tone_lut(toe, lift, shoulder=0.0):
+    """(tone_toe, tone_lift, tone_shoulder) -> (x_grid, y_grid)。1024 点，带缓存。"""
+    key = (round(float(toe), 4), round(float(lift), 4), round(float(shoulder), 4))
     hit = _TONE_CACHE.get(key)
     if hit is not None:
         return hit
-    xs, ys = _tone_pts(float(toe), float(lift))
+    xs, ys = _tone_pts(float(toe), float(lift), float(shoulder))
     g = np.linspace(0.0, 100.0, 1024)
     try:
         from scipy.interpolate import PchipInterpolator
@@ -127,7 +133,8 @@ def _tone_on(p):
     if not p.get('tone_curve', False):
         return False
     return abs(float(p.get('tone_toe', 0.0) or 0.0)) > 1e-9 or \
-        abs(float(p.get('tone_lift', 0.0) or 0.0)) > 1e-9
+        abs(float(p.get('tone_lift', 0.0) or 0.0)) > 1e-9 or \
+        abs(float(p.get('tone_shoulder', 0.0) or 0.0)) > 1e-9
 
 
 def tone_ref(disp_value, cfg=C, stock=None, base=None):
@@ -141,7 +148,7 @@ def tone_ref(disp_value, cfg=C, stock=None, base=None):
     p = stocks.color_params(cfg, stock, base)
     if not _tone_on(p):
         return float(disp_value)
-    g, y = _tone_lut(p['tone_toe'], p['tone_lift'])
+    g, y = _tone_lut(p['tone_toe'], p['tone_lift'], p.get('tone_shoulder', 0.0))
     v = float(np.clip(disp_value, 0.0, 1.0))
     lab = color.to_lab(np.full((1, 1, 3), v, np.float64))
     lab[..., 0] = np.interp(lab[..., 0], g, y)
@@ -186,7 +193,7 @@ def _builtin(disp, cfg, stock=None, base=None):
     L = lab[..., 0]
 
     if has_tone:
-        _g, _y = _tone_lut(p['tone_toe'], p['tone_lift'])
+        _g, _y = _tone_lut(p['tone_toe'], p['tone_lift'], p.get('tone_shoulder', 0.0))
         L = np.interp(L, _g, _y)
         lab[..., 0] = L
 
