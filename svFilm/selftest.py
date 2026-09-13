@@ -865,12 +865,115 @@ def t_entry_bias():
           float(np.max(np.abs(out_a - lin0))) < 1e-12, 'decision=%s' % rep['decision'])
 
 
+def t_review_fixes():
+    """09-13 晚「评审问题全部一起改」的守卫 —— 每修一条就钉一条不变量，防止以后被"简化"掉。"""
+    print('[★ 评审修复守卫：P0-2 / P1-3 / P1-4 / P1-6 / P2-8 / P2-9 / P2-10]')
+
+    # ---------- P0-2：中灰判据统一到 L*（一把尺子），且 dark_lift ⇒ below ----------
+    _below = float(C.TGT_MID_L) - float(C.MID_DEADZONE_L)
+    check('P0-2 阈值都在 L* 一根轴上（dark 门 < below 线 ⇒ dark 必是 below）',
+          float(C.LIFT_DARK_GATE_L) < _below,
+          '%.1f < %.1f' % (C.LIFT_DARK_GATE_L, _below))
+    bad = []
+    for g in (1.6, 1.9, 2.2, 2.5, 2.8, 3.2):
+        dd = _gray_img(gamma=g)
+        rr = analyze.analyze(_lin_from_disp(dd), dd, 'raw')
+        if rr['dark_lift'] and rr['decision'] != 'below':
+            bad.append((g, rr['decision']))
+    check('P0-2 dark_lift ⇒ below（扫 6 档，无"报 below 却没动"的反例）', not bad, str(bad))
+    dd = _gray_img(gamma=2.0)
+    rr = analyze.analyze(_lin_from_disp(dd), dd, 'raw')
+    check('P0-2 decision 由 L* 中位决定（与报告里的 l50 同源，不再用显示域灰度）',
+          (rr['decision'] == 'below') == bool(rr['l50'] < _below)
+          and (rr['decision'] == 'compress') == bool(rr['l50'] > C.GUARD_MID_L),
+          'L50 %.1f / %s' % (rr['l50'], rr['decision']))
+
+    # ---------- P1-3：提到 config 的旋钮**真的被读**（不是提了个空壳） ----------
+    _g0, _y0 = style._tone_lut(1.0, 9.0)
+    _save_w = C.TONE_LIFT_W
+    try:
+        C.TONE_LIFT_W = (0.0, 0.0, 0.0)
+        style._TONE_CACHE.clear()
+        _g1, _y1 = style._tone_lut(1.0, 9.0)
+    finally:
+        C.TONE_LIFT_W = _save_w
+        style._TONE_CACHE.clear()
+    _dw = float(np.max(np.abs(_y1 - _y0)))
+    check('P1-3 影调曲线权重从 config 读（改它曲线跟着变，且缓存键含权重）', _dw > 0.5,
+          '最大差 %.2f' % _dw)
+
+    # ---------- P2-8：bloom 能量守恒的前提必须成对 ----------
+    check('P2-8 bloom 守恒前提：BLOOM_AMOUNT == BLOOM_SPREAD',
+          abs(float(C.BLOOM_AMOUNT) - float(C.BLOOM_SPREAD)) < 1e-9,
+          '%.4f vs %.4f' % (C.BLOOM_AMOUNT, C.BLOOM_SPREAD))
+    _pairs = []
+    for _nm, _st in stocks.TABLE.items():
+        _sp = ((_st.get('spatial') or {}).get('bloom') or {})
+        _a, _s = _sp.get('amount'), _sp.get('spread')
+        if _a is not None and _s is not None and abs(float(_a) - float(_s)) > 1e-9:
+            _pairs.append(_nm)
+    check('P2-8 没有卷单独改其中一个（改了画面会静默不守恒）', not _pairs, str(_pairs))
+
+    # ---------- P1-4：空间序 = bloom → halation → grain ----------
+    cf = _Cfg(BLOOM_ENABLE=True, HALATION_ENABLE=True, GRAIN_ENABLE=True,
+              BLOOM_AMOUNT=0.15, BLOOM_SPREAD=0.15, BLOOM_VEIL=0.02,
+              GRAIN_AMOUNT=0.03, HALATION_AMOUNT=0.11)
+    dd = _gray_img(gamma=0.9)
+    _out, _ = spatial.apply(dd, cf)
+    _p = spatial.resolve(cf)
+    _cur = np.clip(dd, 0.0, 1.0)
+    _cur, _ = spatial.bloom(_cur, _p['bloom'], cf)
+    _cur, _ = spatial.halation(_cur, _p['halation'], cf)
+    _cur, _ = spatial.grain(_cur, _p['grain'], cf)
+    check('P1-4 空间序 = bloom→halation→grain（与手册逐步比，逐位相同）',
+          float(np.max(np.abs(_out - _cur))) < 1e-12)
+
+    # ---------- P1-6：ENTRY_CURVE 的 DR 档步进必须自洽 ----------
+    for _model in cameras.ENTRY_CURVE:
+        z = cameras.dr_zero_evs(_model)
+        if '100' in z and '400' in z:
+            check('P1-6 %s：DR100→DR400 零点差 ≈ +2EV' % _model,
+                  abs((z['400'] - z['100']) - 2.0) < 0.25, '%.3f' % (z['400'] - z['100']))
+        if '100' in z and '200' in z:
+            _step = z['200'] - z['100']
+            _known = (_model, '200') in cameras.FUJI_DR_STEP_KNOWN_BAD
+            _ok = abs(_step - 1.0) < 0.25
+            check('P1-6 %s：DR100→DR200 步进 = +1EV（已知缺陷须登记）' % _model,
+                  _ok or _known, 'step=%+.2f 已登记=%s' % (_step, _known))
+            check('P1-6 %s/DR200 的已知缺陷若已修好 ⇒ 请从 KNOWN_BAD 删掉' % _model,
+                  not (_known and _ok), 'step=%+.2f' % _step)
+
+    # ---------- P2-9：入口护栏有 k 地板 ----------
+    _blown = np.ones((48, 56, 3))
+    _o, _k = io.clip_guard(_blown, C)
+    check('P2-9 clip_guard 有地板（旧下界 0.02 ≈ −5.6EV 会把正常曝光一起拖黑）',
+          _k >= float(C.ENTRY_CLIP_GUARD_LO) - 1e-9,
+          'k=%.3f 地板=%.2f' % (_k, C.ENTRY_CLIP_GUARD_LO))
+    _safe = np.full((48, 56, 3), 0.4)
+    _o2, _k2 = io.clip_guard(_safe, C)
+    check('P2-9 不裁切的图仍然逐位不动（k=1）',
+          abs(_k2 - 1.0) < 1e-12 and float(np.max(np.abs(_o2 - _safe))) < 1e-12)
+
+    # ---------- P2-10：dark 路的白点抬升要记账、且不把高光吹走 ----------
+    dk = _gray_img(gamma=2.4)
+    rep_dk = analyze.analyze(_lin_from_disp(dk), dk, 'raw')
+    _, info_dk = tone.correct(_lin_from_disp(dk), rep_dk, C, allow_lift=True)
+    check('P2-10 dark 路把"白点被抬了几档"记进报告（全库回归据此看暗片高光）',
+          info_dk.get('path') == 'dark' and 'white_raise_ev' in info_dk and 'gain_white' in info_dk,
+          'path=%s white_raise=%+.2fEV' % (info_dk.get('path'),
+                                           float(info_dk.get('white_raise_ev', float('nan')))))
+    check('P2-10 dark 路白点仍落在靶上（没有吹出去）',
+          abs(float(info_dk['y_out'][-1]) - float(color.s2l(C.TGT_WHITE))) < 1e-9,
+          '%.4f vs %.4f' % (info_dk['y_out'][-1], float(color.s2l(C.TGT_WHITE))))
+
+
 def main():
     for fn in (t_color, t_analyze, t_tone_mid_target, t_tone_monotone, t_style_lock,
                t_style_contrast_direction, t_style_tone_curve, t_style_chroma_ends, t_denoise,
                t_guard, t_lut,
                t_io_roundtrip, t_stocks, t_spatial_off, t_spatial_grain,
-               t_spatial_bloom_halation, t_local_skin_floor, t_entry_bias, t_pipeline_smoke):
+               t_spatial_bloom_halation, t_local_skin_floor, t_entry_bias, t_pipeline_smoke,
+               t_review_fixes):
         fn()
     print('-' * 52)
     if FAIL:

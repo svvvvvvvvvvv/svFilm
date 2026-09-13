@@ -179,8 +179,11 @@ def clip_guard(lin, cfg=C):
     y = color.luma(np.clip(lin, 0.0, None))
     if float(np.mean(y >= lvl)) <= allow:
         return lin, 1.0
-    lo, hi = 0.02, 1.0                    # 裁切比例随 k 单调不减 ⇒ 二分
-    for _ in range(28):
+    # ★ P2-9：下界是**保险丝**（config.ENTRY_CLIP_GUARD_LO，默认 0.60 ⇒ 最多压 −0.74EV），
+    #   原来写死 0.02（≈ −5.6EV）—— 遇到大面积真过曝会把正常曝光的部分也一起拖黑。
+    lo = float(getattr(cfg, 'ENTRY_CLIP_GUARD_LO', 0.60))
+    hi = 1.0                              # 裁切比例随 k 单调不减 ⇒ 二分
+    for _ in range(int(getattr(cfg, 'CLIP_GUARD_ITERS', 28))):
         mid = 0.5 * (lo + hi)
         if float(np.mean(y * mid >= lvl)) <= allow:
             lo = mid
@@ -246,9 +249,11 @@ def load_raw(path, max_side=C.MAX_SIDE):
     if C.ENTRY_BIAS_ENABLE:
         bias = float(cam['baseline_ev'])
         # ★ 优先：实测相机曲线（逐 机型×DR 一组；增益锚点 = 线性亮度 → 增益倍数）
+        #   ⚠ P1-6：默认路径（ENTRY_TONE=True）**只取 curve[0]（零点）**，
+        #     `anchors`（形状）是死数据 —— 别以为它还在参与运算（见 cameras.py 文件头）。
         curve = cameras.entry_curve(model, dr)
         if curve is not None:
-            bias = float(curve[0])             # 零点 = 18% 灰处的实测增益（一个 EV 数）
+            bias = float(cameras.entry_zero_ev(model, dr))   # 零点 = 18% 灰处的实测增益（一个 EV 数）
             cam['bias_source'] = '实测相机曲线 DR%s' % dr
         elif raw_ev is not None:
             # 机身直接写了精确 EV（已含基础偏移）—— 次优，只有零点没有形状

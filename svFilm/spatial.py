@@ -104,8 +104,10 @@ def grain(disp, p, cfg=C):
     h, w = g.shape
 
     # 亮度包络：中间调最明显，两端收（胶片就是这样，不是均匀撒盐）
-    env = np.clip(4.0 * g * (1.0 - g), 0.0, 1.0) ** 0.55
-    env *= color.smoothstep(g, float(p.get('dark_floor', 0.03)), float(p.get('dark_floor', 0.03)) + 0.07)
+    _ep = float(getattr(cfg, 'GRAIN_ENV_POW', 0.55))
+    _dw = float(getattr(cfg, 'GRAIN_DARK_WIN', 0.07))
+    env = np.clip(4.0 * g * (1.0 - g), 0.0, 1.0) ** _ep
+    env *= color.smoothstep(g, float(p.get('dark_floor', 0.03)), float(p.get('dark_floor', 0.03)) + _dw)
     # ★ 高光端**精确归零**（09-13 调研修 bug）：原来只压 0.70，白墙/天空还留 30% 颗粒在动。
     #   物理：密度饱和区没有可显影的银盐。外面（LIMO `applyGrainAsExposure`、
     #   Emulsifier `grain_mask=(luma^0.5)(1-luma)^1.5`）两端都精确为 0。
@@ -186,7 +188,8 @@ def bloom(disp, p, cfg=C):
     if spread > 0.0:
         Yg = Yg - spread * hotY                           # ② 化开（核心峰值下降 / 外圈散出去）
     if veil > 0.0:
-        Yg = Yg + veil * (_blur(Yg, radius * 0.55) - Yg)  # ③ 面纱（零均值：抬暗部、压高光）
+        _vr = float(getattr(cfg, 'BLOOM_VEIL_RADIUS_RATIO', 0.55))
+        Yg = Yg + veil * (_blur(Yg, radius * _vr) - Yg)   # ③ 面纱（零均值：抬暗部、压高光）
 
     dY = Yg - Y
     dY = np.maximum(dY, -Y)                               # 不许把亮度扣成负的
@@ -195,7 +198,8 @@ def bloom(disp, p, cfg=C):
 
     # `warmth`：**唯一**改色的地方 —— 只给"加进来的那部分光"染色（0 = 完全中性）
     wa = float(p.get('warmth', 0.0))
-    tint = np.array([1.0 + 0.10 * wa, 1.0 + 0.02 * wa, 1.0 - 0.10 * wa])
+    _tt = tuple(getattr(cfg, 'BLOOM_WARMTH_TINT', (0.10, 0.02, -0.10)))
+    tint = np.array([1.0 + _tt[0] * wa, 1.0 + _tt[1] * wa, 1.0 + _tt[2] * wa])
     out_lin = lin + dY[..., None] * tint
 
     out = np.clip(color.l2s(out_lin), 0.0, 1.0)
@@ -225,7 +229,8 @@ def halation(disp, p, cfg=C):
     r0 = float(p.get('radius', 18.0))
     ratios = p.get('radius_ratios') or [1.0, 0.45, 0.15]
     spread = np.stack([_blur(src[..., i], r0 * float(ratios[i])) for i in range(3)], axis=-1)
-    ring = spread * (1.0 - np.clip(bright * 1.25, 0.0, 1.0))[..., None]
+    _rs = float(getattr(cfg, 'HALATION_RING_SUPPRESS', 1.25))
+    ring = spread * (1.0 - np.clip(bright * _rs, 0.0, 1.0))[..., None]
 
     col = np.asarray(p.get('color', [1.0, 0.30, 0.12]), np.float64)
     out_lin = lin + float(p['amount']) * ring * col
@@ -236,11 +241,21 @@ def halation(disp, p, cfg=C):
 
 # ---------------- 编排 ----------------
 def apply(disp, cfg=C, stock=None):
-    """按 光学 → 乳剂的物理顺序：Halation（片基）→ Bloom（镜头）→ Grain（银盐）。"""
+    """★ 顺序（09-13 晚修 P1-4）= **Bloom（镜头）→ Halation（乳剂/片基）→ Grain（银盐）**。
+
+    为什么改：旧实现是 Halation → Bloom，而 docstring 自称"按**光学 → 乳剂**的物理顺序" ——
+    **自述与实现打架**（光学在前，所以光学应该先做）。外面三家一致：
+      * ReShade 官方 load-order 指南：**镜头级（CA/暗角）先于传感器级（bloom）**；
+      * LIMO：`[LENS]暗角 → [EMULSION]Halation → [CINETONE]显影/印片 → blendBloom`；
+      * filament：bloom 排在 tone/vignette 之前。
+    ⇒ 改成 bloom 在前。**这不是纯改注释**：`cinestill800t` 同时开了 bloom(22px)
+      与 halation(18px)（两半径重叠），重排后它的成片会变 —— 指纹能看出来，属预期。
+    颗粒永远最后（银盐显影是最后一层；它乘性，与前面两者独立）。
+    """
     p = resolve(cfg, stock)
     cur = np.clip(disp, 0.0, 1.0)
-    cur, h_info = halation(cur, p['halation'], cfg)
     cur, b_info = bloom(cur, p['bloom'], cfg)
+    cur, h_info = halation(cur, p['halation'], cfg)
     cur, g_info = grain(cur, p['grain'], cfg)
     info = dict(halation=h_info, bloom=b_info, grain=g_info,
                 any=bool(h_info['applied'] or b_info['applied'] or g_info['applied']),

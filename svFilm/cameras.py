@@ -91,6 +91,29 @@ def dr_bias_ev(dr):
 # 用法：out_lin = in_lin * gain(in_lin 的线性亮度)，gain 由 anchors 线性插值。
 # ⚠ 曲线按 **亮度** 套（`color.luma(lin)` 驱动），三通道同一个增益 ⇒ 不改色相；
 #   这跟契约里"只在亮度域做曲线"一致。
+#
+# ★★★★★ P1-6（09-13 晚评审）：**`anchors` 在默认路径下是死数据！**
+#   入口成形「乙」落地后（`config.ENTRY_TONE = True`，出厂默认），`io.load_raw` 只取
+#   `curve[0]`（= `mid_ev`，一个 EV 数）**当零点**，整套实测 anchors **根本不参与运算**
+#   （`cameras.entry_curve()` 仍返回它们，但调用方丢弃）。之前 `cameras.py` 头注释
+#   把 anchors 描述成"在用"，属**文档失真**，已改。
+#   保留它们的理由：`ENTRY_TONE = False` 时走 `io.apply_entry_curve()`，那时 anchors
+#   就是**唯一**的形状来源 —— 留作 A/B 通道与历史留档，**不是**当前生产路径。
+#   要用零点，请用 `entry_zero_ev()`，别自己去拆 anchors。
+#
+# ★★★★★ 已知数据缺陷（P1-6 顺带，09-13 晚）：**DR 档之间的零点步进不自洽！**
+#   X-T30 III 实测：DR100 **0.108** / DR200 **1.947** / DR400 **2.184**
+#     ⇒ 步进 = **+1.84** 与 **+0.24**，而物理上（DR 每档差 1 EV）该是 **+1 / +1**。
+#   用"两端各自独立"验证：darktable 表 0.72/1.72/2.72 − 实测 0.108/2.184 = 偏移 −0.61 / −0.54
+#     ⇒ 两端指向**同一个统一偏移 ≈ −0.57EV**（= rawpy 解码本身已含的那点基线），
+#        唯独 **DR200 例外（+0.23）** ⇒ **DR200 那一组标定可疑**（很可能那批样张本身拍亮了）。
+#   影响面：库里 **66 张 DR200**，按现行值会被**多提约 0.8 档**。
+#   ⚠ 为什么不直接改成推导值：DR200 的 `mid_ev` 与它自己的 anchors **是自洽的**
+#     （增益@Y=0.18 = 3.857 = 2^1.947），单改 mid_ev 会破坏自洽；而整组按比例缩
+#     又会把"白端增益 = 1.0"这个硬约束弄坏（曲线必须白进白出）。
+#     ⇒ **必须重标**，不能算。`FUJI_DR_STEP_KNOWN_BAD` 把这个已知缺陷显式记下来，
+#       selftest 会**守着它**（一旦重标，测试会提醒把这条豁免删掉）。
+FUJI_DR_STEP_KNOWN_BAD = {('x-t30 iii', '200')}   # 已知步进不自洽的 (机型, DR)；重标后请清空
 ENTRY_CURVE = {
     'x-t30 iii': {
         '100': dict(mid_ev=0.108, anchors=[
@@ -152,7 +175,11 @@ ENTRY_CURVE = {
 
 
 def entry_curve(model=None, dr=None):
-    """取实测相机曲线 -> (mid_ev, xs, gains) 或 None（没有就退回老的常数补偿）。"""
+    """取实测相机曲线 -> (mid_ev, xs, gains) 或 None（没有就退回老的常数补偿）。
+
+    ⚠ 默认路径只消费返回值里的 `[0]`（零点）；`[1]/[2]`（anchors 形状）只在
+      `ENTRY_TONE = False` 时才被 `io.apply_entry_curve` 使用。见文件头 P1-6 说明。
+    """
     tab = ENTRY_CURVE.get(str(model or '').strip().lower())
     if not tab:
         return None
@@ -162,6 +189,22 @@ def entry_curve(model=None, dr=None):
     xs = [float(p[0]) for p in c['anchors']]
     gs = [float(p[1]) for p in c['anchors']]
     return float(c['mid_ev']), xs, gs
+
+
+def entry_zero_ev(model=None, dr=None):
+    """只要**曝光零点**（一个 EV 数）—— 默认路径（`ENTRY_TONE=True`）用的就是它。
+
+    推荐调用方用这个而不是自己拆 `entry_curve()` 的返回元组（P1-6：anchors 是死数据，
+    别再让新代码误以为它参与运算）。没量过就返回 None（调用方退回机型基底 + DR 查表）。
+    """
+    c = entry_curve(model, dr)
+    return None if c is None else float(c[0])
+
+
+def dr_zero_evs(model=None):
+    """同一机型各 DR 档的零点 {dr: mid_ev} —— 给 selftest 查"步进该是 +1EV"用。"""
+    tab = ENTRY_CURVE.get(str(model or '').strip().lower()) or {}
+    return {str(k): float(v['mid_ev']) for k, v in tab.items() if 'mid_ev' in v}
 
 
 def lookup(make=None, model=None):

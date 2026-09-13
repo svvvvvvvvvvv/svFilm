@@ -14,8 +14,12 @@ def _white_frac(disp):
     return float(np.mean(color.gray_of(disp) >= (254.0 / 255.0)))
 
 
-def _solve_scale(disp, cap, lo=0.55, hi=1.0, iters=14):
-    """二分求一个整体缩放系数，使死白占比 <= cap。只往小找。"""
+def _solve_scale(disp, cap, lo=None, hi=1.0, iters=None):
+    """二分求一个整体缩放系数，使死白占比 <= cap。只往小找。（下界/迭代数见 config，P1-3）"""
+    if lo is None:
+        lo = float(getattr(C, 'GUARD_SOLVE_LO', 0.55))
+    if iters is None:
+        iters = int(getattr(C, 'GUARD_SOLVE_ITERS', 14))
     lin = color.s2l(np.clip(disp, 0.0, 1.0))
     if _white_frac(disp) <= cap:
         return 1.0

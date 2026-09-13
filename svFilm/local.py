@@ -22,14 +22,20 @@ from . import config as C
 
 
 def skin_mask(disp):
-    """软掩膜 0~1：色相 5~55 度、有彩度、明度在中段。"""
+    """软掩膜 0~1：色相 5~55 度、有彩度、明度在中段。门限见 `config.SKIN_MASK_*`（P1-3）。"""
     lab = color.to_lab(np.clip(disp, 0.0, 1.0))
     h = color.hue_deg(lab)
     c = color.chroma(lab)
     L = lab[..., 0]
-    m = color.smoothstep(h, 2.0, 14.0) * (1.0 - color.smoothstep(h, 46.0, 66.0))
-    m *= color.smoothstep(c, 5.0, 13.0) * (1.0 - color.smoothstep(c, 70.0, 95.0))
-    m *= color.smoothstep(L, 12.0, 22.0) * (1.0 - color.smoothstep(L, 86.0, 95.0))
+    _hlo = tuple(getattr(C, 'SKIN_MASK_HUE_LO', (2.0, 14.0)))
+    _hhi = tuple(getattr(C, 'SKIN_MASK_HUE_HI', (46.0, 66.0)))
+    _clo = tuple(getattr(C, 'SKIN_MASK_C_LO', (5.0, 13.0)))
+    _chi = tuple(getattr(C, 'SKIN_MASK_C_HI', (70.0, 95.0)))
+    _llo = tuple(getattr(C, 'SKIN_MASK_L_LO', (12.0, 22.0)))
+    _lhi = tuple(getattr(C, 'SKIN_MASK_L_HI', (86.0, 95.0)))
+    m = color.smoothstep(h, _hlo[0], _hlo[1]) * (1.0 - color.smoothstep(h, _hhi[0], _hhi[1]))
+    m *= color.smoothstep(c, _clo[0], _clo[1]) * (1.0 - color.smoothstep(c, _chi[0], _chi[1]))
+    m *= color.smoothstep(L, _llo[0], _llo[1]) * (1.0 - color.smoothstep(L, _lhi[0], _lhi[1]))
     return m
 
 
@@ -39,9 +45,9 @@ def _protect(ref_disp, disp, cfg):
     ref = np.clip(ref_disp, 0.0, 1.0)
     m = skin_mask(cur)                     # 只这一次是全图 Lab
     cov = float(np.mean(m))
-    if cov < 1e-4:
+    if cov < float(getattr(C, 'SKIN_PROTECT_MIN_COV', 1.0e-4)):
         return cur, dict(skin_cov=0.0)
-    sel = m > 1e-3
+    sel = m > float(getattr(C, 'SKIN_PROTECT_SEL', 1.0e-3))
     if not np.any(sel):
         return cur, dict(skin_cov=cov)
     lab_c = color.to_lab(cur[sel])
@@ -70,9 +76,9 @@ def skin_floor(disp, cfg=C):
 
     d = np.clip(disp, 0.0, 1.0)
     m = skin_mask(d)
-    if int((m > 0.5).sum()) < 200:
+    if int((m > 0.5).sum()) < int(getattr(C, 'SKIN_MASK_MIN_PX', 200)):
         return d, dict(applied=False, reason='no_skin')
-    sel = m > 0.02
+    sel = m > float(getattr(C, 'SKIN_MASK_SEL', 0.02))
 
     lab = color.to_lab(d[sel])
     a, b, L = lab[:, 1], lab[:, 2], lab[:, 0]

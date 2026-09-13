@@ -32,27 +32,35 @@ def analyze(lin, disp, kind='raw'):
     dead_white = float(np.mean(g >= (254.0 / 255.0)))
     near_white = float(np.mean(g >= 0.90))
 
-    # 有效曝光偏差（相对上限护栏），**只用来做报告**，不用来决定"要不要提亮"
+    # 有效曝光偏差（相对上限护栏），**只用来做报告**，不用来决定"要提亮还是压暗"
+    # ⚠ 口径说明（P0-2）：这一行仍走显示域（因为它是给"相对灰阶 140 差几档"这种直觉看的），
+    #   而下面的 decision / dark_lift **一律走 L\***（统一后的唯一中灰尺子）。
     ev_est = float(np.log2(max(gm, C.NOISE_FLOOR) / C.TGT_MID))
 
+    # ---- 中灰判据（P0-2：统一到 **L\***，与"大师带"同一把尺子）----
+    # ★ 09-13 晚修：原来 decision 走**显示域灰度中位**、dark_lift 走 **L\***，两把尺子
+    #   （阈值也不在一根轴上：L\*30 ≈ 显示域 0.27，而 below 线是 0.52）
+    #   ⇒ 会出现「报 below 却一步没动」的图，统计"多少张判偏暗"时口径不清。
+    #   现在两者都用 L\* 中位 `l50`，阈值 `TGT_MID_L / GUARD_MID_L / MID_DEADZONE_L`。
+    #   由此 **可证明 `dark_lift ⇒ below`**（30 < 58−2.9），selftest 有守卫。
+    l50 = float(L_p[C.PCT_MID])
+
     # 决策：中灰只当**过亮护栏**（"亮得离谱就压回来"），不当提亮靶。
-    # ⚠ 09-13 起护栏线 = **GUARD_MID**（大师逐图『中位 L*』的 P95 = 87.0 → 显示域 0.854），
-    #   不再是 TGT_MID（灰阶 140）。原因：中位数是**内容量**（画面里暗的东西占多少），
-    #   不是曝光量 —— 大师全体有**一半**的片子中位在 L*58 以上，拿 140 当线等于把正常亮片压闷
+    # ⚠ 09-13 起护栏线 = **GUARD_MID_L**（大师逐图『中位 L*』的 P95 = 87.0），
+    #   不再是 TGT_MID_L（58.0）。原因：中位数是**内容量**（画面里暗的东西占多少），
+    #   不是曝光量 —— 大师全体有**一半**的片子中位在 L*58 以上，拿 58 当线等于把正常亮片压闷
     #   （园岭实测：入口已经把中位送到贴住相机 161，L1 又把它拽回 138）。
     #   欠曝该在入口按 baseline exposure 补（见 io.load_raw）。
-    if gm > C.GUARD_MID:
+    if l50 > C.GUARD_MID_L:
         decision = 'compress'          # 真的亮得离谱 -> 压回来（这就是"救过曝"）
-    elif gm < C.TGT_MID - C.MID_DEADZONE:
+    elif l50 < C.TGT_MID_L - C.MID_DEADZONE_L:
         decision = 'below'             # 偏暗：入口补过就不动；入口补不了才允许兜底提亮
     else:
         decision = 'hold'
 
     # ★ 有界兜底提亮（09-13 SV 拍板「乙」第 2 步）—— 这里只**测量 + 判阈值**，动不动手由
-    #   `pipeline._allow_lift` / `tone.build_curve` 决定。单位用 L*（与大师带的尺子一致），
-    #   比 `decision` 的显示域中灰更贴"这张片子本身是不是太暗"。
+    #   `pipeline._allow_lift` / `tone.build_curve` 决定。单位用 L*（与大师带的尺子一致）。
     #   判据线 `LIFT_DARK_GATE_L` 比落点 `LIFT_DARK_FLOOR_L` 再低一点，只碰明显太黑的。
-    l50 = float(L_p[C.PCT_MID])
     dark_lift = bool(getattr(C, 'LIFT_DARK_ENABLE', False)
                      and l50 < float(getattr(C, 'LIFT_DARK_GATE_L', 0.0)))
 

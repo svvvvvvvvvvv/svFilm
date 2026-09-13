@@ -101,19 +101,27 @@ def _tone_pts(toe, lift, shoulder=0.0):
     """
     xs = np.array([0.0, 10.0, 30.0, 50.0, 70.0, 90.0, 100.0])
     sh = float(shoulder)
+    w_toe, w_lift, w_sh = _tone_w()
     ys = np.array([0.0,
-                   10.0 - toe,                 # 趾部：暗部相对中灰压深
-                   30.0 - toe * 0.45,
-                   50.0 + lift * 0.55,         # 中灰抬起
-                   70.0 + lift * 0.95 - sh * 0.30,   # ↓ 肩部：越靠顶收得越多
-                   90.0 + lift * 0.55 - sh * 0.70,
-                   100.0 - sh])                # 白端（这是"白锚"第一次可动）
+                   10.0 - toe,                          # 趾部：暗部相对中灰压深
+                   30.0 - toe * w_toe,
+                   50.0 + lift * w_lift[0],             # 中灰抬起
+                   70.0 + lift * w_lift[1] - sh * w_sh[0],   # ↓ 肩部：越靠顶收得越多
+                   90.0 + lift * w_lift[2] - sh * w_sh[1],
+                   100.0 - sh * w_sh[2]])               # 白端（这是"白锚"第一次可动）
     return xs, ys
+
+
+def _tone_w():
+    """影调曲线的形状权重（P1-3 提到 config）。★ 必须进缓存键：权重一变曲线就得重算。"""
+    return (float(getattr(C, 'TONE_TOE_W', 0.45)),
+            tuple(getattr(C, 'TONE_LIFT_W', (0.55, 0.95, 0.55))),
+            tuple(getattr(C, 'TONE_SHOULDER_W', (0.30, 0.70, 1.00))))
 
 
 def _tone_lut(toe, lift, shoulder=0.0):
     """(tone_toe, tone_lift, tone_shoulder) -> (x_grid, y_grid)。1024 点，带缓存。"""
-    key = (round(float(toe), 4), round(float(lift), 4), round(float(shoulder), 4))
+    key = (round(float(toe), 4), round(float(lift), 4), round(float(shoulder), 4)) + _tone_w()
     hit = _TONE_CACHE.get(key)
     if hit is not None:
         return hit
@@ -199,7 +207,9 @@ def _builtin(disp, cfg, stock=None, base=None):
 
     if has_tint:
         w = color.smoothstep(L, p['tint_lo'], p['tint_hi'])            # 0 = 暗部, 1 = 亮部
-        fade = color.smoothstep(L, 2.0, 8.0) * (1.0 - color.smoothstep(L, 97.0, 100.0))
+        _flo = tuple(getattr(cfg, 'TINT_FADE_LO', (2.0, 8.0)))
+        _fhi = tuple(getattr(cfg, 'TINT_FADE_HI', (97.0, 100.0)))
+        fade = color.smoothstep(L, _flo[0], _flo[1]) * (1.0 - color.smoothstep(L, _fhi[0], _fhi[1]))
         lab[..., 1] += p['a'] * fade
         lab[..., 2] += (p['b'] + (1.0 - w) * p['b_sh'] + w * p['b_hi']) * fade
 
@@ -224,7 +234,9 @@ def _builtin(disp, cfg, stock=None, base=None):
         # ⚠ 符号：+a·sin(2πu) 在暗部（u<0.5）是**加**值 ⇒ 那是"降对比"。
         #   要"加对比"必须**减**。这里曾经写成加号，导致所有卷的 contrast 方向反了
         #   （标定算出的 contrast>1 = 这条线反差比大师大，落地却在降对比）。
-        a = float(np.clip((p['contrast'] - 1.0) * 0.15, -0.10, 0.12))
+        _sc = float(getattr(cfg, 'CONTRAST_S_SCALE', 0.15))
+        _cl = tuple(getattr(cfg, 'CONTRAST_S_CLAMP', (-0.10, 0.12)))
+        a = float(np.clip((p['contrast'] - 1.0) * _sc, _cl[0], _cl[1]))
         u = np.clip(lab[..., 0] / 100.0, 0.0, 1.0)
         lab[..., 0] = np.clip(u - a * np.sin(2.0 * np.pi * u), 0.0, 1.0) * 100.0
 
@@ -235,13 +247,15 @@ def mid_of(disp):
     return float(np.percentile(color.gray_of(disp), C.PCT_MID))
 
 
-def lock_mid(disp, ref_mid, max_gain=1.25):
+def lock_mid(disp, ref_mid, max_gain=None):
     """把中灰分位拉回**修正层交出来的那个中灰**（不是全局靶）。
 
     这一步是"风格不许改回修正"的机械保证。注意参照物必须是上一层的实际输出，
     不是配置里的靶 —— 否则修正层因为限幅没到靶时，风格层会继续往上拽，
     等于风格层在偷偷做曝光补偿（白点被顶到 246 就是这么来的）。
     """
+    if max_gain is None:
+        max_gain = float(getattr(C, 'LOCK_MID_MAX_GAIN', 1.25))
     gm = mid_of(disp)
     if gm <= C.NOISE_FLOOR or ref_mid <= C.NOISE_FLOOR:
         return disp, 0.0

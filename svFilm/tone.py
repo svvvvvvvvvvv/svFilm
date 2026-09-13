@@ -50,24 +50,25 @@ def build_curve(rep, cfg=C, allow_lift=False):
 
     # ---- 绝对靶：显示域 -> lin 域 ----
     Tb = float(color.s2l(cfg.TGT_BLACK))
-    # 中灰落点分三种：
-    #   compress（真的亮得离谱）-> 落到**过亮护栏线** GUARD_MID：只把"离谱的那一截"收回来，
-    #                             不再拽到中灰 TGT_MID（那会把正常的亮片压闷）。
+    # 中灰落点分三种（★ P0-2：阈值一律走 **L\***，与 analyze 同一把尺子）：
+    #   compress（真的亮得离谱）-> 落到**过亮护栏线** GUARD_MID_L(87.0)：只把"离谱的那一截"收回来，
+    #                             不再拽到中灰 TGT_MID_L(58.0)（那会把正常的亮片压闷）。
     #   dark（★ 有界兜底提亮，09-13 SV 拍板「乙」第 2 步）：靶 = **大师·高反差带的 L*50 下沿**。
-    #       为什么不是 TGT_MID：TGT_MID 是**大师中位**，拽过去就是 09-13 园岭那个老病
+    #       为什么不是 TGT_MID_L：那是**大师中位**，拽过去就是 09-13 园岭那个老病
     #       （每张都被拽到同一个中间灰）；而且实测把上限放开后会连高光一起压（L95 掉、亮点塌）。
     #       "只补进带、不追中位"既够用又天然有界。
-    #   其余（below 的老兜底：入口没补过基线曝光的源）-> 落到 TGT_MID，行为不变。
+    #   其余（below 的老兜底：入口没补过基线曝光的源）-> 落到 TGT_MID_L，行为不变。
     dark = bool(rep.get('dark_lift')) and bool(allow_lift)
     if rep.get('decision') == 'compress':
-        Tm = float(color.s2l(getattr(cfg, 'GUARD_MID', cfg.TGT_MID)))
+        # ★ P0-2：落点也切到 **L\***（GUARD_MID_L 87.0），与 analyze 的判据同一把尺子。
+        Tm = float(color.lin_of_L(float(getattr(cfg, 'GUARD_MID_L', 87.0))))
         # 白点的上限也走"过曝专属"那一档，见下面 tw_out 的注释（09-13 SV 拍板「开顶」）。
         Tw = float(color.s2l(getattr(cfg, 'WHITE_CEIL', cfg.TGT_WHITE)))
     elif dark:
         Tm = float(color.lin_of_L(float(getattr(cfg, 'LIFT_DARK_FLOOR_L', 33.0))))
         Tw = float(color.s2l(cfg.TGT_WHITE))
     else:
-        Tm = float(color.s2l(cfg.TGT_MID))
+        Tm = float(color.lin_of_L(float(getattr(cfg, 'TGT_MID_L', 58.0))))
         Tw = float(color.s2l(cfg.TGT_WHITE))
 
     # ---- 输入位置（log2） ----
@@ -116,10 +117,17 @@ def build_curve(rep, cfg=C, allow_lift=False):
     t_out = [_t(C.NOISE_FLOOR), tb_out, t25_out, tm_out, tk_out, tw_out]
 
     curve = ToneCurve(t_in, t_out)
+    # ★ P2-10 观测（不改行为，只记账）：非过曝路径白点是**绝对靶** `_t(Tw)`，
+    #   对很暗的图（输入白点远低于靶）等于"把最亮端抬起来"。lab 验过 7 帧无损，
+    #   但全库回归要专门看"暗片高光有没有被吹" ⇒ 把这件事量出来记进报告，别再靠印象。
+    _path = 'compress' if rep.get('decision') == 'compress' else ('dark' if dark else 'fallback')
+    _white_raise = float(np.log2(Tw / max(yw, C.NOISE_FLOOR))) if Tw > yw else 0.0
     info = dict(
-        applied=True, capped=capped, dark=dark,
+        applied=True, capped=capped, dark=dark, path=_path,
         allow_lift=bool(allow_lift), gain_mid=float(g), gain_wanted=float(g_raw),
         target_mid_lin=Tm_eff, target_white_lin=Tw,
+        white_raise_ev=_white_raise,               # >0 = 这张图的"最亮端"被曲线上抬了这么多档
+        gain_white=float(np.exp2(tw_out) / max(yw, C.NOISE_FLOOR)),
         ev_mid=float(np.log2(curve.gain(max(ym, C.NOISE_FLOOR)))),
         y_in=[float(yb), float(y25), float(ym), float(yk), float(yw)],
         y_out=[float(v) for v in np.exp2([tb_out, t25_out, tm_out, tk_out, tw_out])],
@@ -175,9 +183,9 @@ def correct(lin, rep, cfg=C, allow_lift=None):
 
     if dec == 'hold' or (dec == 'below' and not allow):
         return lin.copy(), dict(applied=False, reason=dec, ev_mid=0.0, capped=False,
-                                dark=False,
+                                dark=False, path='skip', white_raise_ev=0.0, gain_white=1.0,
                                 allow_lift=allow, gain_mid=1.0, gain_wanted=1.0,
-                                target_mid_lin=float(color.s2l(cfg.TGT_MID)),
+                                target_mid_lin=float(color.lin_of_L(float(getattr(cfg, 'TGT_MID_L', 58.0)))),
                                 target_white_lin=float(color.s2l(cfg.TGT_WHITE)),
                                 y_in=[], y_out=[])
 
