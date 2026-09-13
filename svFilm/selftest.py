@@ -1067,7 +1067,15 @@ def _entry_analytic(cfg, img, ev, a):
     Y = np.maximum(color.luma(np.clip(img, 0.0, None)), 1e-9)
     y = np.power(np.maximum(Y * (2.0 ** float(ev)), 1e-9), g) * float(a)
     d = max(ceil - knee, 1e-6)
-    return np.where(y > knee, knee + d * (1.0 - np.exp(-(y - knee) / d)), y), Y
+    # ★ 09-14 晚：入口的肩有了**形状族**（`ENTRY_SHOULDER_KIND`），这里必须跟着分支，
+    #   否则"趾部可回退"会拿老指数肩的解析值去比新对数肩 ⇒ 守错世界、假报失败。
+    if str(getattr(cfg, 'ENTRY_SHOULDER_KIND', 'exp')).lower() == 'log':
+        umax = max(float(getattr(cfg, 'ENTRY_SHOULDER_UMAX', 12.0)), 1e-6)
+        u = np.clip((y - knee) / d, 0.0, umax)
+        y = np.where(y > knee, knee + d * np.log1p(u) / np.log1p(umax), y)
+    else:
+        y = np.where(y > knee, knee + d * (1.0 - np.exp(-(y - knee) / d)), y)
+    return y, Y
 
 
 def t_entry_toe():

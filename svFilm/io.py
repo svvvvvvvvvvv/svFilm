@@ -181,7 +181,17 @@ def entry_tone(lin, ev, cfg=C, level=None):
     Y = np.maximum(color.luma(np.clip(lin, 0.0, None)), 1e-9)
     y = np.power(np.maximum(Y * (2.0 ** float(ev)), 1e-9), g) * a
     d = max(ceil - knee, 1e-6)
-    np.copyto(y, knee + d * (1.0 - np.exp(-(y - knee) / d)), where=(y > knee))
+    # ★ 肩的形状族（09-14 晚）：`log` 比 `exp` 在高光段保得住层次（见 config 那段注释）。
+    #   两者都严格有界于 ceil ⇒ 都不会触发入口裁切护栏。
+    if str(getattr(cfg, 'ENTRY_SHOULDER_KIND', 'exp')).lower() == 'log':
+        umax = max(float(getattr(cfg, 'ENTRY_SHOULDER_UMAX', 12.0)), 1e-6)
+        # ⚠ 必须把 u 夹到 UMAX —— 不夹的话 u>UMAX 时 log1p(u)/log1p(UMAX) > 1
+        #   ⇒ **输出会冲破 ENTRY_CEIL**（实测 knee.80/ceil.985/UMAX2 会跑到 L* 105），
+        #   那就不是"有界不裁"了，还会顶出真正的死白。
+        u = np.clip((y - knee) / d, 0.0, umax)
+        np.copyto(y, knee + d * np.log1p(u) / np.log1p(umax), where=(y > knee))
+    else:
+        np.copyto(y, knee + d * (1.0 - np.exp(-(y - knee) / d)), where=(y > knee))
     # ---- 趾部（09-13 深夜 SV 拍板「对齐鹿井」）：最低那一段按 TOE 倍走，到 HI 之上完全不动 ----
     # ★ 断点走**内容归一**（= 出口亮度 y 的中位 × 固定倍数），不是绝对亮度。
     #   为什么要这样：固定绝对断点在亮场上正好，在**暗片**上整张图都落在断点之下
@@ -331,10 +341,11 @@ def load_raw(path, max_side=C.MAX_SIDE):
         lin = entry_tone(lin, bias, C, level=a_settle)
         # 报告用：此时曲线只贡献**零点**（形状已由固定成形负责），措辞别让人以为还在复现相机。
         cam['bias_source'] = cam.get('bias_source', '').replace('实测相机曲线', '实测零点')
-        cam['entry_shape'] = '胶片成形 γ%.3f %s 肩%.2f→%.3f %s' % (
+        cam['entry_shape'] = '胶片成形 γ%.3f %s %s肩%.2f→%.3f %s' % (
             C.ENTRY_GAMMA,
             ('落点×%.3f(听相机)' % a_settle) if a_settle is not None
             else ('落点%.2f(全局)' % C.ENTRY_LEVEL),
+            str(getattr(C, 'ENTRY_SHOULDER_KIND', 'exp')),
             C.ENTRY_KNEE, C.ENTRY_CEIL,
             ('趾×%.2f@中位×%.2f~%.2f' % (C.ENTRY_TOE, C.ENTRY_TOE_LO_REL,
                                         C.ENTRY_TOE_HI_REL))
