@@ -68,7 +68,12 @@ def _c(a=0.0, b=0.0, b_sh=0.0, b_hi=0.0, chroma_p=1.0, chroma_s=1.0, chroma_ref=
 
 
 def _s(grain=None, bloom=None, halation=None):
-    """空间那组：三个效果各自的强度/尺度；没给的用 config 默认（默认是关）。"""
+    """空间那组：三个效果各自的强度/尺度；没给的用 config 默认（默认是关）。
+
+    ⚠ **bloom 不在这里给 `amount`**（09-13 SV 定档「化开 0.15」）：加性辉光与化开必须
+    **成对相等**才能量守恒（`config.BLOOM_AMOUNT == config.BLOOM_SPREAD`），所以强度统一由
+    `config.py` 给；卷只保留 `radius / thr_* / warmth / veil` 这些**性格**参数。
+    """
     d = {}
     for k, v in (('grain', grain), ('bloom', bloom), ('halation', halation)):
         if v:
@@ -94,7 +99,7 @@ TABLE = {
         spatial=_s(
             grain=dict(amount=0.0297, size=1.1, chroma=0.18,
                        skin_suppress=0.68, detail_suppress=0.30),
-            bloom=dict(amount=0.0752, radius=22.0, thr_lo=0.74, thr_hi=0.93,
+            bloom=dict(radius=22.0, thr_lo=0.74, thr_hi=0.93,
                        warmth=0.35, veil=0.0248),
         ),
         source='鹿井', calibrated=True,
@@ -108,7 +113,7 @@ TABLE = {
         spatial=_s(
             grain=dict(amount=0.018, size=1.1, chroma=0.16,
                        skin_suppress=0.65, detail_suppress=0.30),
-            bloom=dict(amount=0.085, radius=24.0, thr_lo=0.72, thr_hi=0.92,
+            bloom=dict(radius=24.0, thr_lo=0.72, thr_hi=0.92,
                        warmth=0.20, veil=0.040),
         ),
         source=None, calibrated=False,
@@ -121,7 +126,7 @@ TABLE = {
         spatial=_s(
             grain=dict(amount=0.0355, size=1.3, chroma=0.24,
                        skin_suppress=0.55, detail_suppress=0.25),
-            bloom=dict(amount=0.0610, radius=20.0, thr_lo=0.76, thr_hi=0.94,
+            bloom=dict(radius=20.0, thr_lo=0.76, thr_hi=0.94,
                        warmth=0.15, veil=0.0199),
         ),
         source='石田真澄', calibrated=True,
@@ -134,7 +139,7 @@ TABLE = {
         spatial=_s(
             grain=dict(amount=0.0123, size=0.9, chroma=0.12,
                        skin_suppress=0.70, detail_suppress=0.35),
-            bloom=dict(amount=0.0503, radius=18.0, thr_lo=0.80, thr_hi=0.96,
+            bloom=dict(radius=18.0, thr_lo=0.80, thr_hi=0.96,
                        warmth=0.20, veil=0.0149),
         ),
         source='川岛小鸟(仿拍)', calibrated=True,
@@ -147,7 +152,7 @@ TABLE = {
         spatial=_s(
             grain=dict(amount=0.0476, size=1.5, chroma=0.28,
                        skin_suppress=0.50, detail_suppress=0.20),
-            bloom=dict(amount=0.0777, radius=22.0, thr_lo=0.74, thr_hi=0.93,
+            bloom=dict(radius=22.0, thr_lo=0.74, thr_hi=0.93,
                        warmth=0.30, veil=0.1200),
             # 这一卷的招牌：高光往外散红橙晕圈（作者线雾量 0.32 = 全场最高，坐实）
             halation=dict(amount=0.130, radius=18.0,
@@ -163,7 +168,7 @@ TABLE = {
         spatial=_s(
             grain=dict(amount=0.0062, size=1.0, chroma=0.10,
                        skin_suppress=0.70, detail_suppress=0.40),
-            bloom=dict(amount=0.0626, radius=26.0, thr_lo=0.78, thr_hi=0.94,
+            bloom=dict(radius=26.0, thr_lo=0.78, thr_hi=0.94,
                        warmth=0.10, veil=0.0183),
         ),
         source='酒井貴弘', calibrated=True,
