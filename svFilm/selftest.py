@@ -488,6 +488,38 @@ def t_spatial_bloom_halation():
     check('Halation 外圈以红为主（R 明显 > G）', fr > fg * 1.5,
           '外圈 R/G/B %.5f/%.5f/%.5f' % (fr, fg, fb))
 
+    # ★ 09-13「黑柔阶梯」三条：三个机理独立 + "化开"方向与"加性辉光"相反
+    #   ① 门控修错：veil>0 而 amount=0 时**必须真的动**
+    #      （老代码 `amount<=0` 把整个函数关掉 ⇒ "只开面纱"逐位等于"关"，白扫一档）
+    pv = dict(p['bloom']); pv.update(dict(amount=0.0, veil=0.10, spread=0.0))
+    bv, _ = spatial.bloom(d, pv)
+    dv = float(np.abs(bv - d).max())
+    check('只开面纱（veil>0, amount=0）确实生效', dv > 1e-5, 'max %.2e' % dv)
+
+    #   ② 方向不变量：加性辉光**抬高**核心，化开**压低**核心（参数名语义必须与行为一致）
+    pa = dict(p['bloom']); pa.update(dict(amount=0.15, veil=0.0, spread=0.0))
+    ba, _ = spatial.bloom(d, pa)
+    ps = dict(p['bloom']); ps.update(dict(amount=0.15, veil=0.0, spread=0.60))
+    bs, _ = spatial.bloom(d, ps)
+    core_a = float(ba[95:105, 95:105].mean())
+    core_s = float(bs[95:105, 95:105].mean())
+    check('加性辉光抬核心 / 化开压核心（方向相反）', core_a > core_s + 0.05,
+          '加性 %.4f vs 化开 %.4f' % (core_a, core_s))
+
+    #   ③ 化开把能量**散到外圈**：外圈不能比纯加性的更暗（守恒 ⇒ 核心少了的挪到外面）
+    ring_a = float(ba[58:76, 80:120].mean())
+    ring_s = float(bs[58:76, 80:120].mean())
+    check('化开把能量散到外圈（外圈 ≥ 加性辉光）', ring_s >= ring_a - 1e-9,
+          '加性 %.5f vs 化开 %.5f' % (ring_a, ring_s))
+
+    #   ④ 守恒条件：**amount == spread 时**平坦亮区几乎不动（+amt*glow 与 -spread*hot 相消）。
+    #      注意：单独给 spread（amount=0）就是"只把高光压暗"，不守恒 —— 这一条守的是"配对使用"。
+    flat = np.zeros((200, 200, 3)); flat[:, :] = 0.95
+    pf = dict(p['bloom']); pf.update(dict(amount=0.60, veil=0.0, spread=0.60, warmth=0.0))
+    bf, _ = spatial.bloom(flat, pf)
+    df = float(np.abs(bf - flat).max())
+    check('amount==spread 时平坦亮区不漂（能量守恒）', df < 0.01, 'max %.4f' % df)
+
 
 def _skin_patch(a, b, L=62.0, size=64):
     lab = np.zeros((size, size, 3), np.float64)

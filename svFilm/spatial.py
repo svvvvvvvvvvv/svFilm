@@ -33,7 +33,8 @@ def resolve(cfg=C, stock=None):
                    detail_suppress=cfg.GRAIN_DETAIL_SUPPRESS, dark_floor=cfg.GRAIN_DARK_FLOOR),
         bloom=dict(enable=cfg.BLOOM_ENABLE, amount=cfg.BLOOM_AMOUNT, radius=cfg.BLOOM_RADIUS,
                    thr_lo=cfg.BLOOM_THR_LO, thr_hi=cfg.BLOOM_THR_HI,
-                   warmth=cfg.BLOOM_WARMTH, veil=cfg.BLOOM_VEIL),
+                   warmth=cfg.BLOOM_WARMTH, veil=cfg.BLOOM_VEIL,
+                   spread=cfg.BLOOM_SPREAD),
         halation=dict(enable=cfg.HALATION_ENABLE, amount=cfg.HALATION_AMOUNT,
                       radius=cfg.HALATION_RADIUS, thr_lo=cfg.HALATION_THR_LO,
                       thr_hi=cfg.HALATION_THR_HI, color=list(cfg.HALATION_COLOR),
@@ -139,7 +140,14 @@ def grain(disp, p, cfg=C):
 
 # ---------------- 丙：黑柔 / Bloom ----------------
 def bloom(disp, p, cfg=C):
-    if not p.get('enable') or p.get('amount', 0.0) <= 0.0:
+    amt = float(p.get('amount', 0.0))
+    veil = float(p.get('veil', 0.0))
+    spread = float(p.get('spread', 0.0))
+    # ★ 门控修错（09-13）：以前是 `amount <= 0` 一刀切关掉**整个函数**，
+    #   于是"只开面纱（veil>0 而 amount=0）"根本进不来 —— 实测黑柔阶梯里
+    #   「只面纱」那一档与「关」逐位相同，白扫了一档。
+    #   三个机理是独立的，门控改成"三个都为 0 才跳过"。
+    if not p.get('enable') or (amt <= 0.0 and veil <= 0.0 and spread <= 0.0):
         return np.clip(disp, 0.0, 1.0), dict(applied=False)
 
     cur = np.clip(disp, 0.0, 1.0)
@@ -156,16 +164,27 @@ def bloom(disp, p, cfg=C):
     wa = float(p.get('warmth', 0.0))
     glow = glow * np.array([1.0 + 0.10 * wa, 1.0 + 0.02 * wa, 1.0 - 0.10 * wa])
 
-    out_lin = lin + float(p['amount']) * glow
+    # ① 加性辉光（老行为）：亮部往外**加**光。
+    #    ⚠ 实测方向（09-13 `lab_physics_sweep.py`）：它只让高光端**更高更贴顶**
+    #    （P90/P95/P98 +0.06/+0.07/+0.14；>=253 从 0.00% 涨到 2.7%），
+    #    **不是"收敛"。** 局部确实变软（亮部高通 std −20%），但整体是"更亮"。
+    out_lin = lin + amt * glow
+
+    # ② ★ 能量守恒的「化开」（09-13 新增 `BLOOM_SPREAD`，默认 0 = 逐位等于老行为）。
+    #    把高光掩膜区**自己的**能量扣掉、由它的模糊版补上：`- spread * hot`。
+    #    核心处 blur(hot) < hot ⇒ 峰值**下降**；外圈 blur > 0 而 hot ≈ 0 ⇒ 光**散出去**。
+    #    总能量守恒（模糊不改总和，扣掉的正是加进去的）⇒ 这才是"高光化开 / 高调低反差"的机理。
+    #    大块平坦亮区里 blur(hot) ≈ hot ⇒ 基本不受影响，只动"小而亮"的东西。
+    if spread > 0.0:
+        out_lin = out_lin - spread * hot
 
     # 黑柔特征：整体往"模糊版"靠一点 => 轻微提灰、降对比（Black Pro Mist 那口气）
-    veil = float(p.get('veil', 0.0))
     if veil > 0.0:
         base = np.stack([_blur(out_lin[..., i], radius * 0.55) for i in range(3)], axis=-1)
         out_lin = out_lin * (1.0 - veil) + base * veil
 
     out = np.clip(color.l2s(out_lin), 0.0, 1.0)
-    return out, dict(applied=True, amount=float(p['amount']), radius=radius, veil=veil)
+    return out, dict(applied=True, amount=amt, radius=radius, veil=veil, spread=spread)
 
 
 # ---------------- 丁：Halation ----------------
