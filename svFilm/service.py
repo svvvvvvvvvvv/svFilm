@@ -214,7 +214,10 @@ class _H(BaseHTTPRequestHandler):
                     except KeyError:
                         continue
                     out.append(dict(name=n, label=s.get('label') or n,
-                                    desc=s.get('desc') or ''))
+                                    desc=s.get('desc') or '',
+                                    # ★ 是否真卷（物理链）。前端据此**只列生效的滑杆**
+                                    #   （真卷模式下影调/质感那几步被让位，拧了没反应）。
+                                    spek=bool(s.get('spek'))))
                 return self._json(out)
             if u.path == '/bases':
                 out = []
@@ -303,7 +306,7 @@ _param_lock = threading.Lock()
 # 允许被外部覆盖的前缀（**白名单**，防止前端乱改引擎契约里的东西）
 PARAM_PREFIX = ('TONE_', 'GRAIN_', 'BLOOM_', 'HALATION_', 'DENOISE_', 'WHITE_MICRO',
                 'FACE_', 'DENSITY_', 'CROSSTALK_', 'LAYER_', 'ENTRY_', 'SHADOW_',
-                'COLOR_', 'SKIN_', 'ANCHOR_', 'CAP_', 'SHARP_')
+                'COLOR_', 'SKIN_', 'ANCHOR_', 'CAP_', 'SHARP_', 'SPEK_')
 
 # 不收白名单里的这些（结构性/开关类，乱改会破契约）
 PARAM_BLOCK = ('ENTRY_CURVE', 'ENTRY_SHOULDER_KIND', 'LUT_PATH', 'BASE', 'STOCK')
@@ -356,14 +359,40 @@ class _Overrides:
 
 # ---- 前端要的「可调参数清单」（带范围）--------------------------------------
 # 只列**真值得给人拧的**那几个 —— 别把 config 里 200 个常量全倒出来。
+# `grp`   = 前端按这个分组画（真卷 / 脸 / 影调 / 质感）
+# `spek`  = True 只在**真卷**模式下生效；False 只在**中性基准**下生效；None = 都生效。
+#   ⚠ 真卷自带 H&D + 颗粒 + halation，我们的影调/空间层**让位**了
+#     ⇒ 那几根在真卷下拧了**没反应**，前端要求「不生效的就别列出来」（SV 09-14）。
 PARAMS = [
-    dict(k='TONE_LIFT',       name='中高调抬起',   lo=0,  hi=16,  step=0.5, d='整张变亮（也会带出高光肩部）'),
-    dict(k='TONE_TOE',        name='趾部压深',     lo=0,  hi=2.0, step=0.05, d='暗部压深的量'),
-    dict(k='TONE_SHOULDER',   name='高光肩部',     lo=0,  hi=6,   step=0.5, d='大 = 高光收得多；小 = 开顶'),
-    dict(k='GRAIN_AMOUNT',    name='颗粒',        lo=0,  hi=0.10, step=0.002, d='颗粒强度'),
-    dict(k='BLOOM_AMOUNT',    name='黑柔',        lo=0,  hi=0.20, step=0.005, d='高光溢出（黑柔）强度'),
-    dict(k='HALATION_AMOUNT', name='红橙晕圈',     lo=0,  hi=0.30, step=0.01, d='高光边缘的红橙光晕'),
-    dict(k='WHITE_MICRO',     name='白区层次',     lo=0,  hi=1.5, step=0.1, d='白衣服/白墙的微反差'),
+    # ---- 真卷（物理链）专属：落点 / 味道 ----
+    dict(k='SPEK_PE_SHIFT',   name='本张落点',   lo=0.5, hi=2.0, step=0.02, grp='真卷', spek=True,
+         d='整张压暗/调亮。>1 更暗。相机给多了曝光的片（闪光顶亮）靠它压回该在的亮度'),
+    dict(k='SPEK_COUPLERS',   name='整张浓淡',   lo=0.0, hi=1.0, step=0.05, grp='真卷', spek=True,
+         d='彩度（胶片层间抑制）。越小越淡；1.0 = 出厂物理值'),
+    dict(k='SPEK_DIFFUSION_STRENGTH', name='柔光', lo=0.0, hi=0.75, step=0.05, grp='真卷', spek=True,
+         d='放大机端黑柔（颗粒保锐）。0 = 关；0.25 ≈ 1/4 档，越大越化'),
+    # ---- 脸（两条路都生效：真卷下 L3 肤色层是保留的）----
+    dict(k='FACE_SPAN_KMAX',  name='脸的层次',   lo=1.0, hi=4.0, step=0.1, grp='脸',
+         d='脸内部明暗最多拉开几倍。1.0 = 不动，越大越立体（但过头会显脏）'),
+    dict(k='SKIN_FLOOR_A',    name='脸的红绿',   lo=10.0, hi=20.0, step=0.5, grp='脸',
+         d='脸的 a*（+ 偏红 / − 偏绿）。降它 = 脸不那么橘'),
+    dict(k='SKIN_FLOOR_B',    name='脸的黄蓝',   lo=12.0, hi=22.0, step=0.5, grp='脸',
+         d='脸的 b*（+ 偏黄 / − 偏蓝）'),
+    # ---- 影调 / 质感：**只有中性基准**下才生效（真卷自带，我们让位）----
+    dict(k='TONE_LIFT',       name='中高调抬起', lo=0,  hi=16,  step=0.5, grp='影调', spek=False,
+         d='整张变亮（也会带出高光肩部）'),
+    dict(k='TONE_TOE',        name='趾部压深',   lo=0,  hi=2.0, step=0.05, grp='影调', spek=False,
+         d='暗部压深的量'),
+    dict(k='TONE_SHOULDER',   name='高光肩部',   lo=0,  hi=6,   step=0.5, grp='影调', spek=False,
+         d='大 = 高光收得多；小 = 开顶'),
+    dict(k='GRAIN_AMOUNT',    name='颗粒',       lo=0,  hi=0.10, step=0.002, grp='质感', spek=False,
+         d='颗粒强度'),
+    dict(k='BLOOM_AMOUNT',    name='黑柔',       lo=0,  hi=0.20, step=0.005, grp='质感', spek=False,
+         d='高光溢出（黑柔）强度'),
+    dict(k='HALATION_AMOUNT', name='红橙晕圈',   lo=0,  hi=0.30, step=0.01, grp='质感', spek=False,
+         d='高光边缘的红橙光晕'),
+    dict(k='WHITE_MICRO',     name='白区层次',   lo=0,  hi=1.5, step=0.1, grp='质感',
+         d='白衣服/白墙的微反差'),
 ]
 _PARAM_KEYS = tuple(p['k'] for p in PARAMS)
 

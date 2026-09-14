@@ -150,11 +150,18 @@ def run_from(sample, cfg=C, stock=None, base=None, out=None, lut=None,
         # ★★ L2 整段换成**真卷**：喂**场景线性**（`lin_in`），出显示域。
         #   它自带 H&D + `dir_couplers`(彩度) + 染料；落点由 `SPEK_PRINT_EXPOSURE` 定。
         # ★ 每卷一个 pe（09-14 标定：不同相纸响应不同 ⇒ 全局一个值会让富士卷偏亮 30 个 L*）
-        _pe = float(_spek.get('pe') or getattr(cfg, 'SPEK_PRINT_EXPOSURE', 0.55))
+        # ★★ 09-14 新增：再乘一个**逐张微调系数** `SPEK_PE_SHIFT`。
+        #   为什么要分开：全局改 `SPEK_PRINT_EXPOSURE` **会被每卷的 pe 盖掉**（实测三档同值）
+        #   ⇒ 落点滑杆一直是死的。改成「每卷基准 × 全局系数」后它才真的动得了画面。
+        #   用途：救被闪光顶亮的片（1065/1067）—— 只压这一张，别的片不动。
+        _base_pe = float(_spek.get('pe') or getattr(cfg, 'SPEK_PRINT_EXPOSURE', 0.55))
+        _shift = float(getattr(cfg, 'SPEK_PE_SHIFT', 1.0) or 1.0)
+        _pe = _base_pe * _shift
         disp2 = spektra.render(lin_in, st['name'], cfg, print_exposure=_pe)
         s_info = dict(applied=True, how='spektrafilm', stock=st['name'],
                       film=_spek.get('film'), print=_spek.get('print'),
-                      print_exposure=_pe, tone_curve=False, film_color_w=0.0)
+                      print_exposure=_pe, pe_base=_base_pe, pe_shift=_shift,
+                      tone_curve=False, film_color_w=0.0)
     else:
         disp2, s_info = style.apply(disp1, cfg, lut=lut, lock_ref=style.mid_of(disp1),
                                     stock=st, base=base)
