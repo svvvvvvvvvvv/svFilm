@@ -139,16 +139,12 @@ def t_tone_mid_target():
     check('无 NaN/Inf', np.all(np.isfinite(lin)))
     check('取值在 0~1', lin.min() >= -1e-9 and lin.max() <= 1.0 + 1e-9)
 
-    # ★ 开顶**不许越界**：兜底提亮那条路的白点输入常远低于落点，放开等于把高光连色一起放大，
-    #   所以那条路必须继续守 TGT_WHITE。
+    # ★ 09-14：白点现在**只设上限**；且 **L1 不再提亮**（提亮归锚点）
     d3 = _gray_img(gamma=2.2)                       # 偏暗 -> decision == 'below'
     rep3 = analyze.analyze(_lin_from_disp(d3), d3, 'jpg')
-    lin3, info3 = tone.correct(_lin_from_disp(d3), rep3, C, allow_lift=True)
-    check('开顶只对过曝路径生效（这张判成 below）', rep3['decision'] == 'below', rep3['decision'])
-    if info3['applied']:
-        gw3 = float(np.percentile(color.gray_of(np.clip(color.l2s(lin3), 0, 1)), C.PCT_WHITE))
-        check('兜底提亮路径的白点仍守 TGT_WHITE（没被开顶带偏）',
-              abs(gw3 - C.TGT_WHITE) < 0.03, '%.4f vs %.4f' % (gw3, C.TGT_WHITE))
+    lin3, info3 = tone.correct(_lin_from_disp(d3), rep3, C)
+    check('偏暗（below）⇒ L1 一步不动（提亮归锚点）',
+          rep3['decision'] == 'below' and not info3['applied'], rep3['decision'])
 
 
 def t_tone_monotone():
@@ -156,7 +152,7 @@ def t_tone_monotone():
     y = np.logspace(-5, 0, 4000)
     d = np.clip(color.l2s(y), 0, 1).reshape(1, -1, 1).repeat(3, -1)
     rep = analyze.analyze(y.reshape(1, -1, 1).repeat(3, -1), d, 'jpg')
-    curve, _ = tone.build_curve(rep, C, allow_lift=True)
+    curve, _ = tone.build_curve(rep, C)
     o = curve(y)
     check('曲线单调不减', bool(np.all(np.diff(o) >= -1e-12)))
     # log2 域斜率 = 每一档输入放大几倍。0~4 之外说明曲线要么会翻转、要么在暗部造台阶
@@ -364,8 +360,9 @@ def t_denoise():
     d[:80], d[80:160], d[160:] = 0.20, 0.45, 0.82
     d = np.clip(d + rng.normal(0, 0.025, d.shape), 0.0, 1.0)
 
-    off, i0 = denoise.apply(d, C)
-    check('默认关 = 恒等', float(np.max(np.abs(off - d))) < 1e-12 and not i0['applied'])
+    off, i0 = denoise.apply(d, _Cfg(DENOISE_ENABLE=False))
+    check('关掉 = 恒等（⚠ 出厂 09-14 起是**开**，所以这里显式关）',
+          float(np.max(np.abs(off - d))) < 1e-12 and not i0['applied'])
 
     cfg = _Cfg(DENOISE_ENABLE=True)
     on, i1 = denoise.apply(d, cfg)
@@ -494,11 +491,20 @@ def t_stocks():
 
 
 def t_spatial_off():
-    print('[空间域：默认关 = 恒等]')
-    d = _gray_img(gamma=0.55)
-    out, info = spatial.apply(d, C, stock=None)
-    check('三个都关时不动像素', float(np.max(np.abs(out - d))) < 1e-12)
-    check('info.any=False', not info['any'])
+    print('[空间域：全关 = 恒等]')
+    # ⚠ 09-14 起出厂**默认开**（SV：「需要那些空间层的」）⇒ 这条要**显式关掉**三个开关再测。
+    ks = ('GRAIN_ENABLE', 'BLOOM_ENABLE', 'HALATION_ENABLE')
+    old = {k: getattr(C, k) for k in ks}
+    try:
+        for k in ks:
+            setattr(C, k, False)
+        d = _gray_img(gamma=0.55)
+        out, info = spatial.apply(d, C, stock=None)
+        check('三个都关时不动像素', float(np.max(np.abs(out - d))) < 1e-12)
+        check('info.any=False', not info['any'])
+    finally:
+        for k, v in old.items():
+            setattr(C, k, v)
 
 
 def t_spatial_grain():
@@ -717,13 +723,6 @@ def _mn(entries):
     return b'FUJIFILM' + struct.pack('<I', 12) + body + struct.pack('<I', 0) + blob
 
 
-class _Sample:
-    """给 pipeline._allow_lift 用的最小替身（只要 kind + cam）。"""
-
-    def __init__(self, kind, cam=None):
-        self.kind = kind
-        self.cam = cam or {}
-
 
 def t_entry_bias():
     print('[入口基线曝光：MakerNote tag 语义]')
@@ -813,87 +812,20 @@ def t_entry_bias():
           and io.apply_entry_curve(_g, _cv)[0, 0, 0] / 0.18
           > io.apply_entry_curve(np.array([[[0.60] * 3]]), _cv)[0, 0, 0] / 0.60)
 
-    print('[入口基线曝光：曝光层不再提亮]')
-    like = _Sample('raw', {'idt_bias_ev': 2.72})
-    check('入口补过 -> 不再提亮', pipeline._allow_lift(like, C) is False)
-    check('入口补 0 -> 允许兜底提亮', pipeline._allow_lift(_Sample('raw', {'idt_bias_ev': 0.0}), C) is True)
-    check('入口没这项(非富士) -> 允许兜底提亮',
-          pipeline._allow_lift(_Sample('raw', {}), C) is True)
-    check('JPG 一律不提亮', pipeline._allow_lift(_Sample('jpg'), C) is False)
-
-    print('[★ 有界兜底提亮（乙）：只补"太黑的"，不碰其余]')
-    check('入口补过 + 整张偏低 -> 允许（有界）提亮',
-          pipeline._allow_lift(like, C, {'decision': 'below', 'dark_lift': True}) is True)
-    check('入口补过 + 不算低 -> 仍不提亮（亮场/大反差那批逐位不变）',
-          pipeline._allow_lift(like, C, {'decision': 'below', 'dark_lift': False}) is False)
-    # L0 的判据：L*50 低于「大师·高反差带下沿」才算"太黑"
-    d_dk = _gray_img(gamma=2.6)                      # 很暗 -> dark_lift
-    rep_dk = analyze.analyze(_lin_from_disp(d_dk), d_dk, 'raw')
-    check('很暗的图 -> dark_lift', rep_dk['dark_lift'] is True, 'L*50 %.1f' % rep_dk['l50'])
-    d_ok = _gray_img(gamma=0.7)                      # 正常亮 -> 不动它
-    rep_ok = analyze.analyze(_lin_from_disp(d_ok), d_ok, 'raw')
-    check('正常的图 -> 不 dark_lift', rep_ok['dark_lift'] is False, 'L*50 %.1f' % rep_ok['l50'])
-    # 落点 = 带下沿，且有上限（不是拽到大师中位）
-    # ⚠ 用 gamma=2.1（L*50≈25，只欠 ~0.8 档）→ **不会**撞上限，才量得到"落点"；
-    #   gamma=2.6 那种极暗图会撞上限，落点是"上限处"而不是带下沿。
-    d_dk = _gray_img(gamma=2.1)
-    rep_dk = analyze.analyze(_lin_from_disp(d_dk), d_dk, 'raw')
-    out_dk, info_dk = tone.correct(_lin_from_disp(d_dk), rep_dk, C, allow_lift=True)
-    check('有界兜底确实动手', info_dk['applied'] and info_dk['dark'], 'ev%+.2f' % info_dk['ev_mid'])
-    check('★ 落点 = 大师带下沿（不是拽到中位 TGT_MID）',
-          abs(np.log2(info_dk['target_mid_lin']
-                      / float(color.lin_of_L(C.LIFT_DARK_FLOOR_L)))) < 1e-6,
-          'in %.4f vs 带下沿 %.4f（TGT_MID 会是 %.4f）'
-          % (info_dk['target_mid_lin'], float(color.lin_of_L(C.LIFT_DARK_FLOOR_L)),
-             float(color.s2l(C.TGT_MID))))
-    check('★ 有界兜底后中间调抬到带下沿附近',
-          abs(info_dk['y_out'][2] - float(color.lin_of_L(C.LIFT_DARK_FLOOR_L))) < 1e-9,
-          'L*%.1f' % float(color.L_of_lin(info_dk['y_out'][2])))
-    check('有界兜底后白点仍守 TGT_WHITE',
-          abs(float(np.percentile(color.gray_of(np.clip(color.l2s(out_dk), 0, 1)), C.PCT_WHITE))
-              - C.TGT_WHITE) < 0.03)
-    # 极暗图 -> 撞上限（"设上限防冲过头"）
-    # ★ 用例**必须随上限自适应**：上限一放宽，原来那张"极暗图"会先够到落点（LIFT_DARK_FLOOR_L）
-    #   而根本撞不到顶 ⇒ `capped` 变 False，用例自己失效（09-13 把上限 1.6→2.6 时就这么挂过）。
-    #   这里从深到浅扫一档 gamma，取第一个"撞顶"的。
-    hit = None
-    for _g in (8.0, 6.5, 5.5, 4.5, 3.6, 3.0, 2.6):
-        d_x = _gray_img(gamma=_g)
-        rep_x = analyze.analyze(_lin_from_disp(d_x), d_x, 'raw')
-        _, info_x = tone.correct(_lin_from_disp(d_x), rep_x, C, allow_lift=True)
-        if info_x['capped']:
-            hit = (_g, info_x)
-            break
-    check('★ 提亮有上限（极暗图 ≤ LIFT_DARK_CAP_EV 档）',
-          hit is not None and hit[1]['ev_mid'] <= C.LIFT_DARK_CAP_EV + 1e-6,
-          ('gamma%.1f ev%+.2f vs 上限 %.2f' % (hit[0], hit[1]['ev_mid'], C.LIFT_DARK_CAP_EV))
-          if hit else 'gamma 扫到 8.0 都没撞顶 —— 上限是不是被放得太大了？')
-
-    # 端到端：同一张偏暗图，allow_lift False 时像素不动
-    d = _gray_img(gamma=0.9)
-    lin0 = _lin_from_disp(d)
-    rep = analyze.analyze(lin0, d, 'raw')
-    out_a, _ = tone.correct(lin0, rep, C, allow_lift=False)
-    check('allow_lift=False 时偏暗图逐像素不动',
-          float(np.max(np.abs(out_a - lin0))) < 1e-12, 'decision=%s' % rep['decision'])
+    print('[位置：入口 settle 定基准 + 脸锚点补偿]')
+    _tsrc = open(tone.__file__, encoding='utf-8').read()
+    check('L1 影调曲线**只压不提**（旧的兜底提亮整套已删）',
+          'allow_lift' not in _tsrc and 'EV_CAP_UP' not in _tsrc)
+    check('位置：唯一会给画面提亮的是锚点（pipeline 调 io.refocus）',
+          'io.refocus(' in open(pipeline.__file__, encoding='utf-8').read())
 
 
 def t_review_fixes():
     """09-13 晚「评审问题全部一起改」的守卫 —— 每修一条就钉一条不变量，防止以后被"简化"掉。"""
     print('[★ 评审修复守卫：P0-2 / P1-3 / P1-4 / P1-6 / P2-8 / P2-9 / P2-10]')
 
-    # ---------- P0-2：中灰判据统一到 L*（一把尺子），且 dark_lift ⇒ below ----------
+    # ---------- P0-2：中灰判据统一到 L*（一把尺子） ----------
     _below = float(C.TGT_MID_L) - float(C.MID_DEADZONE_L)
-    check('P0-2 阈值都在 L* 一根轴上（dark 门 < below 线 ⇒ dark 必是 below）',
-          float(C.LIFT_DARK_GATE_L) < _below,
-          '%.1f < %.1f' % (C.LIFT_DARK_GATE_L, _below))
-    bad = []
-    for g in (1.6, 1.9, 2.2, 2.5, 2.8, 3.2):
-        dd = _gray_img(gamma=g)
-        rr = analyze.analyze(_lin_from_disp(dd), dd, 'raw')
-        if rr['dark_lift'] and rr['decision'] != 'below':
-            bad.append((g, rr['decision']))
-    check('P0-2 dark_lift ⇒ below（扫 6 档，无"报 below 却没动"的反例）', not bad, str(bad))
     dd = _gray_img(gamma=2.0)
     rr = analyze.analyze(_lin_from_disp(dd), dd, 'raw')
     check('P0-2 decision 由 L* 中位决定（与报告里的 l50 同源，不再用显示域灰度）',
@@ -969,17 +901,18 @@ def t_review_fixes():
     check('P2-9 不裁切的图仍然逐位不动（k=1）',
           abs(_k2 - 1.0) < 1e-12 and float(np.max(np.abs(_o2 - _safe))) < 1e-12)
 
-    # ---------- P2-10：dark 路的白点抬升要记账、且不把高光吹走 ----------
-    dk = _gray_img(gamma=2.4)
+    # ---------- 白点：**只设上限**（09-14 起不再有「必须等于 TGT_WHITE」那条路） ----------
+    #   ⚠ 必须挑一张 **compress** 的图（L*50 > GUARD_MID_L 87）—— 那是现在**唯一**还会动曲线的路；
+    #     偏暗/hold 的图 `correct` 会整条跳过（`y_out` 是空数组）。
+    dk = np.full((64, 64, 3), 0.95)                 # 恒定很亮 ⇒ L*50 ≈ 97 > GUARD_MID_L 87 ⇒ compress
     rep_dk = analyze.analyze(_lin_from_disp(dk), dk, 'raw')
-    _, info_dk = tone.correct(_lin_from_disp(dk), rep_dk, C, allow_lift=True)
-    check('P2-10 dark 路把"白点被抬了几档"记进报告（全库回归据此看暗片高光）',
-          info_dk.get('path') == 'dark' and 'white_raise_ev' in info_dk and 'gain_white' in info_dk,
-          'path=%s white_raise=%+.2fEV' % (info_dk.get('path'),
-                                           float(info_dk.get('white_raise_ev', float('nan')))))
-    check('P2-10 dark 路白点仍落在靶上（没有吹出去）',
-          abs(float(info_dk['y_out'][-1]) - float(color.s2l(C.TGT_WHITE))) < 1e-9,
-          '%.4f vs %.4f' % (info_dk['y_out'][-1], float(color.s2l(C.TGT_WHITE))))
+    _, info_dk = tone.correct(_lin_from_disp(dk), rep_dk, C)
+    _cap_w = float(color.s2l(C.WHITE_CEIL))
+    check('白点只设上限：compress 路真的动手，落点 ≤ WHITE_CEIL、且永不抬',
+          rep_dk['decision'] == 'compress' and info_dk['applied']
+          and float(info_dk['y_out'][-1]) <= _cap_w + 1e-9
+          and float(info_dk['white_raise_ev']) <= 1e-9,
+          'decision=%s y_out=%s cap=%.4f' % (rep_dk['decision'], info_dk['y_out'][-1:], _cap_w))
 
 
 def t_entry_settle():
@@ -1040,14 +973,14 @@ def t_entry_settle():
         check('曝光指数口径：L*%.2f → e=%+.4f（与 lab_pos_law_fit 逐字一致）' % (_L, _want),
               abs(_e - _want) < 1e-9, '%.6f vs %.6f' % (_e, _want))
 
-    # ⑥ 兜底提亮让位：入口被规律定过 ⇒ L1 不许再提（否则同一个"位置"补两次）
-    class _S:                                     # 最小 sample 替身
-        kind, cam = 'raw', dict(idt_bias_ev=2.2, entry_settle='e=-3.4 DR400 → 落点 ×1.295')
-    _S2 = type('S2', (), {'kind': 'raw', 'cam': dict(idt_bias_ev=2.2)})  # 没被规律定过
-    check('兜底提亮：入口被"落点规律"定过 ⇒ 让位（返回 False）',
-          pipeline._allow_lift(_S, C, {'dark_lift': True}) is False)
-    check('兜底提亮：没被规律定过的图，行为不变（仍看 dark_lift）',
-          pipeline._allow_lift(_S2, C, {'dark_lift': True}) is True)
+    # ⑥ 位置来源（09-14 评审后）：**入口 settle 定基准 + 脸锚点做「只提不压」的补偿**；
+    #    旧的「兜底提亮」整套（`_allow_lift` / `LIFT_DARK_*` / `ALLOW_LIFT*`）已删。
+    _tsrc2 = open(tone.__file__, encoding='utf-8').read()
+    check('位置：L1 只压不提（tone 里没有 allow_lift / EV_CAP_UP / LIFT_DARK）',
+          all(k not in _tsrc2 for k in ('allow_lift', 'EV_CAP_UP', 'LIFT_DARK')))
+    check('位置：锚点接在 L0 之前（pipeline 调 io.anchor_ev + io.refocus）',
+          'io.anchor_ev(' in open(pipeline.__file__, encoding='utf-8').read()
+          and 'io.refocus(' in open(pipeline.__file__, encoding='utf-8').read())
 
     # ⑦ 接线守卫：装配点必须看开关（关掉 ENTRY_SETTLE_ENABLE 即回落 ENTRY_LEVEL）
     _src = open(io.__file__, encoding='utf-8').read()
@@ -1165,14 +1098,13 @@ def t_face_layer():
     print('[脸层 · 每层护脸]')
     # ① 出厂值（SV 09-14 拍板「乙」：靶从 p25=62 提到中位 68）
     check('脸层出厂开着（09-13 已转正）', C.FACE_ENABLE is True)
-    check('① 位置靶 = 68（鹿井脸 L* 中位；「乙」把原来的 p25=62 换掉）',
-          float(C.FACE_TGT_L) == 68.0, '%.1f' % C.FACE_TGT_L)
+    check('① 位置的靶只有一个：ANCHOR_FACE_L = 68（鹿井脸 L* 中位）',
+          float(C.ANCHOR_FACE_L) == 68.0, '%.1f' % C.ANCHOR_FACE_L)
     check('第 4 条「每层护脸」出厂开着', C.FACE_GUARD_LAYERS is True)
-    # ★★ 09-14 SV：「去掉人物的提亮」⇒ 位置那一步整步跳过，但形状 A1 照旧
-    check('人物的提亮：出厂**关**（FACE_LIFT_ENABLE=False；形状 A1 不受影响）',
-          C.FACE_LIFT_ENABLE is False)
-    check('接线：提亮那一步真的读 FACE_LIFT_ENABLE（不是写死）',
-          'FACE_LIFT_ENABLE' in inspect.getsource(local.face_tone))
+    # ★★ 09-14：位置（提亮）**搬出这一层**了，归 `io.anchor_ev`（一条全局曲线，不分区域）
+    check('位置不在脸层：local.face_tone 只做形状（源码里没有 FACE_TGT_L / FACE_LIFT_*）',
+          'FACE_TGT_L' not in inspect.getsource(local.face_tone)
+          and 'FACE_LIFT' not in inspect.getsource(local.face_tone))
     # ② 接线：真的插了两道、真的读开关（不是"接了没通"）
     src = inspect.getsource(pipeline.run)
     check('接线：pipeline.run 里调了两次 local.face_tone（L2 后 / 空间层后）',

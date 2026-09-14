@@ -197,13 +197,12 @@ def face_tone(disp, cfg=C):
         return d, info
     Lb = float(np.median(L[sel]))
 
-    # ---- ① 位置：只提不压（★ 09-14 SV：「去掉人物的提亮」⇒ `FACE_LIFT_ENABLE=False` 直接跳过）----
-    #   关掉之后这一步恒等（`dL=0`），但 **② 形状（立体感 A1）照旧跑** —— 两件事分开。
+    # ---- ① 位置：**这里不再做**（09-14）----
+    #   提亮（把脸提到好看亮度）归 `io.anchor_ev` / `io.refocus` —— 那是**一条全局曲线**，
+    #   不分区域；这一层只剩「② 形状（立体感 A1）」。靶也只剩一个 `ANCHOR_FACE_L`。
+    #   （原来那三个"脸部提亮"的旋钮——开关/靶/上限——已随之一并删除。）
     dL = 0.0
-    if bool(getattr(cfg, 'FACE_LIFT_ENABLE', True)):
-        dL = float(np.clip(float(getattr(cfg, 'FACE_TGT_L', 62.0)) - Lb, 0.0,
-                           float(getattr(cfg, 'FACE_LIFT_MAX', 40.0))))
-    L1 = (L + pw * dL) if dL > 1e-3 else L
+    L1 = L
 
     # ---- ② 形状：以脸中位为锚拉开已有的明暗（A1：各向同性，只放大已有的，不编光）----
     q10, q90 = np.percentile(L1[sel], [10.0, 90.0])

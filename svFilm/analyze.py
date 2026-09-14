@@ -58,17 +58,12 @@ def analyze(lin, disp, kind='raw'):
     else:
         decision = 'hold'
 
-    # ★ 有界兜底提亮（09-13 SV 拍板「乙」第 2 步）—— 这里只**测量 + 判阈值**，动不动手由
-    #   `pipeline._allow_lift` / `tone.build_curve` 决定。单位用 L*（与大师带的尺子一致）。
-    #   判据线 `LIFT_DARK_GATE_L` 比落点 `LIFT_DARK_FLOOR_L` 再低一点，只碰明显太黑的。
-    dark_lift = bool(getattr(C, 'LIFT_DARK_ENABLE', False)
-                     and l50 < float(getattr(C, 'LIFT_DARK_GATE_L', 0.0)))
-
+    # ⚠ 09-14：原「有界兜底提亮」的 `dark_lift` 判据**已删** —— 提亮现在归
+    #   `io.anchor_ev`（脸的锚点，只提不压）。这里只留 `decision`：hold / below / compress。
     return {
         'kind': kind,
         'decision': decision,
         'l50': l50,
-        'dark_lift': dark_lift,
         'gray_pcts': gray_p,        # 显示域灰度 0~1
         'gray255': {k: v * 255.0 for k, v in gray_p.items()},
         'L_pcts': L_p,

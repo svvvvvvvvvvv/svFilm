@@ -88,32 +88,6 @@ def _entry_bias(sample):
     return None if v is None else float(v)
 
 
-def _allow_lift(sample, cfg, rep=None):
-    """能不能让曝光层（L1）兜底提亮。
-
-    三条，按顺序：
-      1) JPG / 关掉 RAW 提亮 ——> 不许（JPG 提亮 = 把被压过的颜色按斜率放大）。
-      2) 入口**没补过**基线曝光（非富士 / 读不到 tag）——> 老兜底，允许。
-      3) 入口**补过** ——> 09-13 SV 拍板「乙」第 2 步起**不再一刀切**。
-         入口换成「零点 + 固定成形」后，成形是固定的 ⇒ **场景本身暗**的图会被忠实压在很低的地方
-         （实测 DSCF0547 成片 L*50 只有 17.4，大师·高反差带下沿是 33）。那是**曝光**问题，
-         该由曝光层**有界地**补回来。判据 = `analyze` 报的 `dark_lift`（中间调低于带下沿）；
-         不满足就照旧不许提 —— 这样"亮场/大反差"那批**逐位不变**。
-    """
-    if sample.kind != 'raw':
-        return bool(cfg.ALLOW_LIFT_JPG)
-    if not cfg.ALLOW_LIFT_RAW:
-        return False
-    b = _entry_bias(sample)
-    if b is None or abs(b) <= 1e-6:
-        return True
-    if not cfg.AUTO_LIFT_ONLY_WHEN_NO_ENTRY_BIAS:
-        return True
-    # ★ 位置逐张听相机（09-13 深夜）：入口落点已由「机型×DR 实测落点规律」**逐张**定过 ⇒
-    #   兜底提亮必须让位，否则同一个"位置"会被补两次（规律本来就把暗片放到相机的位置上了）。
-    if (sample.cam or {}).get('entry_settle'):
-        return False
-    return bool(rep is not None and rep.get('dark_lift'))
 
 
 def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=False,
@@ -128,12 +102,20 @@ def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=Fa
     d_ev, anc = io.anchor_ev(s.disp, cfg)
     _on = bool(anc.get('applied'))
     lin_in = io.refocus(s.lin, d_ev, cfg) if _on else s.lin
+    if _on:
+        # ★★ 09-14 评审修：锚点把入口曲线**重打**了 ⇒ 入口那道裁切护栏（`clip_guard`）
+        #   是**在重打之前**算的，结论已经失效 ⇒ 这里**必须再跑一遍**。
+        #   不跑的话"提亮救脸"会顺手绕过护栏把背景推爆（实测 0805 背景 75→96、护栏当时算出 k=1.0）。
+        lin_in, _gk2 = io.clip_guard(lin_in, cfg)
+        anc['clip_guard_k'] = _gk2
+        if abs(_gk2 - 1.0) > 1e-9:
+            anc['clip_guard_ev'] = float(np.log2(_gk2))
     disp_in = (np.clip(color.l2s(np.clip(lin_in, 0.0, None)), 0.0, 1.0)
                if _on else s.disp)
 
     rep0 = analyze.analyze(lin_in, disp_in, s.kind)                  # L0
-    allow = _allow_lift(s, cfg, rep0)
-    lin1, t_info = tone.correct(lin_in, rep0, cfg, allow_lift=allow)  # L1
+    # L1 影调修正（**只压不提**：提亮交给入口 settle + 脸锚点，兜底提亮那套 09-14 已删）
+    lin1, t_info = tone.correct(lin_in, rep0, cfg)                   # L1
     disp1 = np.clip(color.l2s(np.clip(lin1, 0.0, 1.0)), 0.0, 1.0)
     disp1, d_info = denoise.apply(disp1, cfg)                        # 降噪（L1 之后、L2 之前）
 
@@ -170,8 +152,6 @@ def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=Fa
         camera=s.cam,
         entry_bias_ev=_entry_bias(s),
         fuji_dr=(s.cam or {}).get('fuji_dr'),
-        allow_lift=allow,
-        dark_lift=bool(rep0.get('dark_lift')),
         stock=(st or {}).get('name'),
         stock_label=stocks.label_of((st or {}).get('name')),
         base=stocks.resolve_base(cfg, base)['name'],
