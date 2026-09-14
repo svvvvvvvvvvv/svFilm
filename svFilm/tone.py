@@ -98,8 +98,17 @@ def build_curve(rep, cfg=C, allow_lift=False):
     #   把落点定在 220 的原因。⇒ 09-13 SV 拍板的「开顶」：过曝片的高光不再被挤成 218~220 的平板。
     #   `max(..., tm_out)` 是单调性兜底：上限再低也不许压到中灰以下。
     # 其余（兜底提亮）：白点的输入常常远低于落点，落点必须守 TGT_WHITE，否则高光连色一起放大。
-    if rep.get('decision') == 'compress':
-        tw_out = max(min(tw_in, _t(Tw)), tm_out)
+    # ★★ 09-14 早（SV：「继续」查 L90 为什么低 4）：**"没提亮"时也只设上限。**
+    #   原来 fallback 路一律 `tw_out = _t(TGT_WHITE)`（灰阶 220 = **L\* 87.7** = "必须等于"），
+    #   但 `ENTRY_SETTLE_ENABLE=True` 之后 L1 的增益被夹在 1.0（**不提亮**）⇒
+    #   那条"必须有"的理由（防高光连色放大）已经不成立，只剩坏处：
+    #   逐层追踪实测（0805/2328/0791/0999）——**入口刚交出来的 L90 是 91~98**
+    #   （≈ 大师真胶片的 90.0），**L1 一刀砍到 74~80**，L2 只补回一部分 ⇒
+    #   最终 L90 83~86，比大师低 4~7。⇒ 没提亮时改成**只设上限** `WHITE_CEIL`（灰阶 245 = L\* 96.5）。
+    lift_on = bool(g > 1.0 + 1e-9)
+    if rep.get('decision') == 'compress' or not lift_on:
+        _cap_w = float(color.s2l(getattr(cfg, 'WHITE_CEIL', cfg.TGT_WHITE)))
+        tw_out = max(min(tw_in, _t(_cap_w)), tm_out)
     else:
         tw_out = _t(Tw)
 

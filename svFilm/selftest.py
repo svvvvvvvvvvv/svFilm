@@ -1266,9 +1266,11 @@ def t_l4_caps():
           '%.3f ≤ %.3f' % (sc[-1], cap_f + soft))
     check('软压：单调不回头（压完还是越亮越亮）', bool(np.all(np.diff(sc) >= -1e-9)))
 
-    # ②b 力度（SV 09-14：「背景压太多了，压一半试试」）
-    check('力度出厂 = 0.5（压一半；1.0 = 全压，0.0 = 等于关闸）',
-          abs(float(C.CAP_STRENGTH) - 0.5) < 1e-9, '%.2f' % C.CAP_STRENGTH)
+    # ②b 力度（09-14：「背景压太多了」→ 压一半；09-14 早：逐层追踪找到**对齐大师 L90**的点）
+    # ★ 出厂 0.35，不是 0.5 —— 实测力度→L90：0.00→97/94/95、0.25→93/92/92、
+    #   **0.35→90.4/89.9/89.8**、0.50→86/86/86；大师真胶片 L90 = **90.0** ⇒ 0.35 三张全中。
+    check('力度出厂 = 0.35（对齐大师 L90=90.0 的那个点；1.0 = 全压，0.0 = 等于关闸）',
+          abs(float(C.CAP_STRENGTH) - 0.35) < 1e-9, '%.2f' % C.CAP_STRENGTH)
     check('接线：力度从 config 读（没写死）', 'CAP_STRENGTH' in src)
     pressed_full = L - guard._soft_cap_L(L, cap_f, soft, 1.0)
     pressed_half = L - guard._soft_cap_L(L, cap_f, soft, 0.5)
