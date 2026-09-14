@@ -486,10 +486,128 @@ def load_raw(path, max_side=C.MAX_SIDE):
         if _gk < 0.999:
             cam['bias_source'] = '%s +高光护栏 ×%.3f' % (cam.get('bias_source', ''), _gk)
 
-    lin, wb_info = idt_wb(lin)
+    # ★ 09-14 SV 选「D 肤色优先 + C 相机直出回落」：老 `idt_wb` 限幅 ±0.25、实测只动 0.13 个 b\* ⇒ 基本没在工作。
+    lin, wb_info = wb_film(lin, thumb if thumb else b'', C)
     disp = np.clip(color.l2s(lin), 0.0, 1.0)
     cam = dict(cam, wb=wb_info)
     return Sample(lin, disp, 'raw', path, exif, cam)
+
+
+def _sel_skin(disp, cfg):
+    """肤色选择子（廉价：色相 + 彩度 + 明度三重门，不跑分割）。"""
+    lab = color.to_lab(np.clip(disp, 0.0, 1.0))
+    h = color.hue_deg(lab)
+    c = color.chroma(lab)
+    L = lab[..., 0]
+    m = (color.smoothstep(h, 2.0, 14.0) * (1.0 - color.smoothstep(h, 46.0, 66.0))
+         * color.smoothstep(c, 5.0, 13.0) * (1.0 - color.smoothstep(c, 70.0, 95.0))
+         * color.smoothstep(L, 12.0, 22.0) * (1.0 - color.smoothstep(L, 86.0, 95.0)))
+    return m > 0.5, lab
+
+
+def _sel_neutral(disp, cfg):
+    """近中性选择子（老的灰世界用的就是它）。"""
+    s = color.sat_hsv(disp)
+    g = color.gray_of(disp)
+    return (s < float(cfg.WB_NEUTRAL_SAT)) & (g > 0.05) & (g < 0.95), color.to_lab(np.clip(disp, 0.0, 1.0))
+
+
+def _ab_of(lab, sel):
+    if sel is None or int(np.count_nonzero(sel)) < 200:
+        return None
+    return float(np.median(lab[..., 1][sel])), float(np.median(lab[..., 2][sel]))
+
+
+def wb_film(lin, thumb=b'', cfg=C):
+    r"""入口白平衡（09-14 SV 选「D 肤色优先 + C 相机直出回落」）。
+
+    为什么重写：老的 `idt_wb` 是"近中性像素的灰世界"，增益限 **±0.25**，
+    实测整张只动 **0.13 个 b\*** —— **基本等于没在工作**。而实测我们与**相机直出**的
+    色偏差 **±4**（双向，不是一律偏黄）。
+
+    两个靶，按"画面里有没有皮肤"选：
+      · **D 有皮肤** ⇒ 把**肤色**的 a\*/b\* 挪到大师脸区实测靶（`WB2_SKIN_A/B` = 16.3 / 18.5）。
+        ★ 这是"以人为本"：人好不好看是**目的**，其余颜色跟着它走。
+      · **C 没皮肤** ⇒ 拿**相机内嵌 JPEG** 的近中性色偏当靶 = "对齐相机直出"。
+      · 两个都拿不到 ⇒ 不动（逐位不变）。
+
+    解的是**一组分通道增益**（线性域），**迭代 + 限幅** ⇒ 天然有界、不会失控。
+    """
+    if not bool(getattr(cfg, 'WB2_ENABLE', True)):
+        return lin, dict(applied=False, reason='off')
+    cap = float(getattr(cfg, 'WB2_MAX_GAIN', 0.35))
+    iters = int(getattr(cfg, 'WB2_ITERS', 6))
+    step = float(getattr(cfg, 'WB2_STEP', 0.45))
+    kA = float(getattr(cfg, 'WB2_KA', 1.0))
+    kB = float(getattr(cfg, 'WB2_KB', 1.0))
+    dza = float(getattr(cfg, 'WB2_DEAD_A', 3.0))
+    dzb = float(getattr(cfg, 'WB2_DEAD_B', 3.0))
+
+    def _measure(g):
+        d = np.clip(color.l2s(np.clip(lin * g, 0.0, None)), 0.0, 1.0)
+        sel_s, lab_s = _sel_skin(d, cfg)
+        if float(np.mean(sel_s)) >= float(getattr(cfg, 'WB2_SKIN_COVER', 0.008)):
+            return _ab_of(lab_s, sel_s), 'skin', float(np.mean(sel_s))
+        sel_n, lab_n = _sel_neutral(d, cfg)
+        return _ab_of(lab_n, sel_n), 'neutral', float(np.mean(sel_n))
+
+    # C 的靶：相机内嵌 JPEG 的**近中性**色偏（没有 thumb 就没这个靶）
+    cam_ab = None
+    if thumb:
+        try:
+            with Image.open(_stdlib_io.BytesIO(thumb)) as im:
+                im = im.convert('RGB')
+                im.thumbnail((512, 512))
+                d0 = np.asarray(im, np.float64) / 255.0
+            sel_n, lab_n = _sel_neutral(d0, cfg)
+            cam_ab = _ab_of(lab_n, sel_n)
+        except Exception:
+            cam_ab = None
+
+    now, how, cov = _measure(np.ones(3))
+    if now is None:
+        return lin, dict(applied=False, reason='no_selector')
+    if how == 'skin' and cam_ab is not None:
+        # ★★ 09-14 关键设计（实测出来的）：**两条轴要分开取靶**
+        #   · **a\*（红绿）**：肤色该红润 —— 这是**跨场景可比**的（"白里缺红"到哪都是错的）⇒ 用**肤色靶 16.3**
+        #   · **b\*（黄蓝）**：暖度**是场景属性** —— 大师脸区的 b\*18.5 是他们场景下的绝对值，
+        #     跨场景不可比（跟"大师中灰 58 不可比"是同一条铁律）。硬拽过去 = 把整张变黄
+        #     ⇒ 用**相机内嵌 JPEG 的近中性靶**（同一个场景的答案）
+        a_t, b_t = float(getattr(cfg, 'WB2_SKIN_A', 16.3)), cam_ab[1]
+        src = 'skin_a+camera_b'
+    elif how == 'skin':
+        a_t, b_t = float(getattr(cfg, 'WB2_SKIN_A', 16.3)), float(getattr(cfg, 'WB2_SKIN_B', 18.5))
+        src = 'skin'
+    elif cam_ab is not None:
+        a_t, b_t = cam_ab
+        src = 'camera'
+    else:
+        return lin, dict(applied=False, reason='no_target', how=how, cover=cov)
+
+    gain = np.ones(3)
+    for _ in range(iters):
+        now, _h, _c = _measure(gain)
+        if now is None:
+            break
+        da, db = now[0] - a_t, now[1] - b_t
+        # ★ 死区：偏离靶没超过 `WB2_DEAD_*` 就**完全不动**（免得为了"精确命中"把整张拽走）
+        if abs(da) <= dza:
+            da = 0.0
+        if abs(db) <= dzb:
+            db = 0.0
+        if max(abs(da), abs(db)) < 0.08:
+            break
+        # a\* 由 R/G 驱动（偏红 ⇒ 减红、加绿）；b\* 由 B 驱动（偏黄 ⇒ **加蓝**）
+        gain[0] *= 1.0 - kA * da * step * 0.02
+        gain[1] *= 1.0 + kA * da * step * 0.01
+        gain[2] *= 1.0 + kB * db * step * 0.02
+        gain = np.clip(gain, 1.0 - cap, 1.0 + cap)
+    now2, _h, _c = _measure(gain)
+    lin2 = lin * gain.reshape(1, 1, 3)
+    return lin2, dict(applied=True, source=src, how=how, cover=cov,
+                      target=[a_t, b_t], before=[now[0], now[1]] if now else None,
+                      after=[now2[0], now2[1]] if now2 else None,
+                      gain=[float(v) for v in gain])
 
 
 def load(path, max_side=C.MAX_SIDE, src=None):
