@@ -72,14 +72,6 @@ def _stock_of(stock, cfg):
     return stock
 
 
-def _face_guard_on(cfg):
-    """★ 第 4 条「每层护脸」是否开：整层脸层开着 **且** `FACE_GUARD_LAYERS` 为真。
-
-    关掉（或把 `FACE_ENABLE` 设 False）⇒ 逐位回到"只在 L3 末尾护一道"的老行为。
-    """
-    return bool(getattr(cfg, 'FACE_ENABLE', False)) and bool(getattr(cfg, 'FACE_GUARD_LAYERS', True))
-
-
 def _entry_bias(sample):
     """入口实际补掉了几档基线曝光（io.load_raw 写在 cam 里）。JPG 路径没有这一项。"""
     if sample.kind != 'raw':
@@ -130,22 +122,12 @@ def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=Fa
     if _on and bool(getattr(cfg, 'ANCHOR_FINISH', True)):
         disp2, _fin = io.finish_anchor(disp2, cfg)
         anc['finish'] = _fin
-    # ★ 第 4 条「每层护脸」（09-14 SV 拍板「乙」，靶 68）：L2 之后先护一道 ——
-    #   影调曲线会把脸拉平；而真正的主力是后面的空间层（**黑柔 + 颗粒**，实测压掉脸跨度 17~31%），
-    #   所以空间层之后还要再护一道。靶是**绝对值** ⇒ 后层压下去、下一道就补回来。
-    #   两处都复用 `local.face_tone`，不新写动作；关掉 `FACE_GUARD_LAYERS` 即回到老行为。
-    if _face_guard_on(cfg):
-        disp2r = disp2
-        disp2, fg1 = local.face_tone(disp2, cfg)
-    else:
-        disp2r, fg1 = disp2, dict(applied=False, reason='off')
+    # ⚠ 09-14 SV：「把脸部立体感的部分删掉」⇒ 原来在 L2 之后 / 空间层之后各插一道
+    #   `local.face_tone`（第 4 条「每层护脸」），**已整段删除**。
+    disp2r = disp2
     disp2b, sp_info = spatial.apply(disp2, cfg, stock=st)            # 空间域（颗粒/黑柔/Halation）
-    if _face_guard_on(cfg):
-        disp2br = disp2b
-        disp2b, fg2 = local.face_tone(disp2b, cfg)
-    else:
-        disp2br, fg2 = disp2b, dict(applied=False, reason='off')
-    disp3, l_info = local.apply(disp1, disp2b, cfg)                  # L3（内部再护一道，保留）
+    disp2br = disp2b
+    disp3, l_info = local.apply(disp1, disp2b, cfg)                  # L3
     disp4, g_info = guard.enforce(disp3, cfg)                        # L4
 
     rep = dict(
@@ -162,7 +144,6 @@ def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=Fa
         style=s_info,
         spatial=sp_info,
         local=l_info,
-        face_guard=dict(after_style=fg1, after_spatial=fg2),
         anchor=anc,
         guard=g_info,
         ms=(time.perf_counter() - t0) * 1000.0,

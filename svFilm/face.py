@@ -95,7 +95,7 @@ def masks(disp):
     ★ 09-14 补两个键：原来只暴露 bg/person/skin，而 **`skin` 是"脸皮肤 + 身体皮肤"合起来的**
     （`cm[3] + cm[2]`）⇒ 拿它当"脸"必然把**手臂/手**一起圈进来（DSCF1954 / DSCF0791 实测）。
     分割本来就是分开的两类，只是没暴露。现在把 **`face_skin`（cm[3]）** 和
-    **`hair`（cm[1]，用来定"头在哪"）** 单独拿出来 —— `face_region()` 靠它们工作。
+    **`hair`（cm[1]，定"头在哪"）** 也单独拿出来。
     """
     import cv2
     seg, mp = _segmenter()
@@ -111,67 +111,6 @@ def masks(disp):
                 skin=up(cm[3] + cm[2]),        # 原语义（脸+身），别动
                 face_skin=up(cm[3]),           # ★ 单独的脸皮肤
                 hair=up(cm[1]))                # ★ 头发（定"头在哪"的锚）
-
-
-def face_region(m, cfg=C):
-    r"""★ 「脸在哪」—— **不靠正脸检测框**。返回 `(bool 掩膜 或 None, 说明)`。
-
-    为什么需要它（09-13 深夜 SV 逼出来的）：**正脸检测器对"正侧脸 / 背影 / 小脸"基本给不出框**
-      · DSCF1954 正侧脸：机内 JPEG **0 个候选**，成片只给一个 26×32 的垃圾框 ⇒ 整张被跳过；
-      · DSCF0999 小脸：被 `FACE_GATE_EYED`（眼距 ≥3% 图宽）挡掉 —— 而它框里**明明有 2025 个皮肤
-        像素**，"脸太小量不准"这个理由**根本不成立**；
-      · DSCF1782：眼距 2.7% 图宽，差一点点。
-    ⇒ 而"脸在哪"**其实是知道的**：分割的 `face_skin`（单独那一类脸皮肤）**对侧脸也认**。
-
-    规则：`face_skin > 0.5 且 person > 0.3` → 连通域 → 只留**落在"头窗口"里的块**。
-      头窗口 = `[头发外接框顶, 头发顶 + FACE_HEAD_K × 头发宽]`
-      （**头发一定长在头上**，侧脸/背影都有 ⇒ 它是比正脸检测器稳得多的锚）。
-      头发太少（< `FACE_MIN_HAIR_PX`）就退化成"人物外接框的上部 `FACE_HEAD_FALLBACK_FRAC`"。
-    ⇒ 手臂/手即便被误判成脸皮肤，也会因为**落在头窗口之外**被丢掉（这是 v1 用"皮肤总类"时栽的坑：
-      DSCF1954 的脸和手臂皮肤连成同一块 97275 px，靠"质心在上半身"根本筛不掉）。
-
-    ⚠ 拿不到就返回 `None` —— 调用方**必须**回落老的"正脸框"路径，绝不比改动前更差。
-    """
-    import cv2
-    fs = (m['face_skin'] > 0.5) & (m['person'] > 0.3)
-    H, W = fs.shape
-    if int(fs.sum()) < int(getattr(cfg, 'FACE_REGION_MIN_PX', 300)):
-        return None, 'no_face_skin'
-    pm = m['person'] > 0.5
-    if int(pm.sum()) == 0:
-        return None, 'no_person'
-    ys, _xs = np.where(pm)
-    y0p, y1p = float(ys.min()), float(ys.max())
-    ph = max(y1p - y0p, 1.0)
-
-    hair = m['hair'] > 0.5
-    if int(hair.sum()) >= int(getattr(cfg, 'FACE_MIN_HAIR_PX', 200)):
-        hy, hx = np.where(hair)
-        hy0, hx0, hx1 = float(hy.min()), float(hx.min()), float(hx.max())
-        hw = float(hx1 - hx0 + 1)
-        y_hi = hy0
-        y_lo = min(hy0 + float(getattr(cfg, 'FACE_HEAD_K', 1.35)) * hw,
-                   y0p + float(getattr(cfg, 'FACE_HEAD_BOT_FRAC', 0.65)) * ph)
-        x_lo, x_hi = hx0 - 0.5 * hw, hx1 + 0.5 * hw
-        how = 'hair_window'
-    else:
-        y_hi = y0p
-        y_lo = y0p + float(getattr(cfg, 'FACE_HEAD_FALLBACK_FRAC', 0.45)) * ph
-        x_lo, x_hi = 0.0, float(W)
-        how = 'top_window'
-
-    wm = np.zeros_like(fs)
-    wm[int(max(y_hi, 0)):int(min(y_lo, H)), int(max(x_lo, 0)):int(min(x_hi, W))] = True
-    n, lab = cv2.connectedComponents((fs & wm).astype(np.uint8), connectivity=8)
-    keep = np.zeros_like(fs)
-    for i in range(1, n):
-        blk = lab == i
-        if int(blk.sum()) < int(getattr(cfg, 'FACE_REGION_MIN_PX', 300)):
-            continue
-        keep |= blk
-    if int(keep.sum()) < int(getattr(cfg, 'FACE_REGION_MIN_PX', 300)):
-        return None, 'window_empty'
-    return keep, how
 
 
 def landmarks(disp, person):
@@ -242,8 +181,8 @@ def parse(disp):
       person_weight = 软权重（**背景处恒为 0**）
     )
 
-    ★ 09-14：`face`（正脸框）只当**回落路径 + 排假脸**用了 —— "脸在哪"优先走 `face_region(masks)`，
-    它不依赖正脸检测器，侧脸 / 背影 / 小脸都能拿到。详见 `face_region` 的 docstring。
+    ★ 09-14：`face`（正脸框）现在**只服务"挑脸/排假脸"这几道闸**。
+    （原来那个靠"脸皮肤连通块 + 头窗口"定"脸在哪"的 `face_region` 已随脸部立体感一起删除。）
     """
     import cv2
     m = masks(disp)

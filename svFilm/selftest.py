@@ -1092,33 +1092,6 @@ def t_entry_toe():
           and "getattr(cfg, 'ENTRY_TOE_HI_REL', 0.84)" in _src)
 
 
-def t_face_layer():
-    """★ 脸层（L3）+ 第 4 条「每层护脸」—— 全都不依赖模型。"""
-    import inspect
-    print('[脸层 · 每层护脸]')
-    # ① 出厂值（SV 09-14 拍板「乙」：靶从 p25=62 提到中位 68）
-    check('脸层出厂开着（09-13 已转正）', C.FACE_ENABLE is True)
-    check('① 位置的靶只有一个：ANCHOR_FACE_L = 68（鹿井脸 L* 中位）',
-          float(C.ANCHOR_FACE_L) == 68.0, '%.1f' % C.ANCHOR_FACE_L)
-    check('第 4 条「每层护脸」出厂开着', C.FACE_GUARD_LAYERS is True)
-    # ★★ 09-14：位置（提亮）**搬出这一层**了，归 `io.anchor_ev`（一条全局曲线，不分区域）
-    check('位置不在脸层：local.face_tone 只做形状（源码里没有 FACE_TGT_L / FACE_LIFT_*）',
-          'FACE_TGT_L' not in inspect.getsource(local.face_tone)
-          and 'FACE_LIFT' not in inspect.getsource(local.face_tone))
-    # ② 接线：真的插了两道、真的读开关（不是"接了没通"）
-    src = inspect.getsource(pipeline.run)
-    check('接线：pipeline.run 里调了两次 local.face_tone（L2 后 / 空间层后）',
-          src.count('local.face_tone(') >= 2, 'count=%d' % src.count('local.face_tone('))
-    check('接线：那道门读的是 FACE_GUARD_LAYERS（没有写死）',
-          'FACE_GUARD_LAYERS' in inspect.getsource(pipeline._face_guard_on))
-    # ③ 形状放大只认一条线：跨度线 35（09-14 SV：「光方向」那套已删）
-    check('② 形状只认一条线：跨度线 = 35',
-          float(C.FACE_TGT_SPAN) == 35.0, '%.1f' % C.FACE_TGT_SPAN)
-    check('形状的 k 只由跨度线决定（线 FACE_TGT_SPAN / 现状 span，夹在 [1, FACE_SPAN_KMAX]）',
-          'FACE_TGT_SPAN' in inspect.getsource(local.face_tone)
-          and 'FACE_SPAN_KMAX' in inspect.getsource(local.face_tone))
-
-
 def t_anchor():
     r"""★★ 「脸的锚点决定位置」（09-14 SV 选「乙/甲」）—— 一条曲线、不分区域、不用掩膜。
 
@@ -1289,7 +1262,7 @@ def main():
                t_guard, t_lut,
                t_io_roundtrip, t_stocks, t_spatial_off, t_spatial_grain,
                t_spatial_bloom_halation, t_local_skin_floor, t_entry_bias, t_pipeline_smoke,
-               t_review_fixes, t_entry_settle, t_entry_toe, t_face_layer, t_anchor,
+               t_review_fixes, t_entry_settle, t_entry_toe, t_anchor,
                t_film_color):
         fn()
     print('-' * 52)
