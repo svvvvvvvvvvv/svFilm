@@ -36,12 +36,13 @@ import copy
 # 短名 -> 中文名 + 一句话人话说明（汇报时用它，别甩英文代号）
 _LABEL = {
     'neutral': ('中性基准', '不风格化，原样放行（做 A/B 对照用）'),
-    'portra400': ('柯达 Portra 400', '"鹿井"那条线：整体微绿、暗部回暖、亮部收一点彩 —— 最不挑人'),
-    'pro400h': ('富士 Pro 400H', '青绿通透、低对比（⚠ 未标定，手写近似；数据里没有这条线）'),
-    'fuji_c200': ('富士 C200', '"石田真澄"那条线：低饱和、略平、暗部回暖 —— 日常淡调'),
-    'ektar100': ('柯达 Ektar 100', '"川岛小鸟(仿拍)"那条线：整体最暖最浓、暗部平、亮部反压冷'),
-    'cinestill800t': ('电影卷 800T', '"MasashiWakui"那条线：亮部爆暖 + 强雾 + 红橙晕圈(Halation)'),
-    'air': ('日系空气感', '"酒井貴弘"那条线：亮调为主、暗部微暖、彩度略高于基准'),
+    # ★★ 09-14 SV 定：**丢弃作者线，全部用真卷**（他的理由：「作者线们本来就是用真胶片拍的」
+    #   ⇒ 那只是**从真胶片成片上量的二手**（还隔着小红书压缩图），而真卷是**一手**）。
+    'portra400': ('柯达 Portra 400', '真卷：Kodak Portra 400 负片 + Portra Endura 相纸（spektrafilm 物理链）'),
+    'pro400h': ('富士 Pro 400H', '真卷：Fujifilm Pro 400H + Crystal Archive Type II'),
+    'fuji_c200': ('富士 C200', '真卷：Fujifilm C200 + Crystal Archive Type II'),
+    'ektar100': ('柯达 Ektar 100', '真卷：Kodak Ektar 100 + Endura Premier'),
+    'cinestill800t': ('电影卷 800T', '真卷：Kodak Vision3 500T + 2383 印片（Cinestill 800T 就是它去碳层）'),
 }
 
 _ID = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
@@ -99,90 +100,59 @@ TABLE = {
         source=None, calibrated=True,   # 恒等 = 无需标定
     ),
 
-    # ── 以下五卷：颜色由 calib_stocks_from_masters.py 从大师线量出（09-12） ──
+
+    # ══ 五个真卷（09-14 SV：「丢弃作者线，全部用真卷」）══════════════════════════
+    # 作者线是**从真胶片成片上量的二手**（还隔着小红书压缩图）；真卷是**数据表 + 光谱测量的一手**。
+    # 组装：**我们只出「入口 + 锚点 + 降噪 + 肤色 + 护栏」，胶片性格整段交给真卷**。
     'portra400': dict(
         name='portra400', label=_LABEL['portra400'][0], desc=_LABEL['portra400'][1],
-        color=_c(a=-0.48, b=-0.74, b_sh=+1.33, b_hi=+0.22,
-                 chroma_p=1.041, chroma_s=0.999, contrast=1.055),
-        spatial=_s(
-            grain=dict(amount=0.0297, size=1.1, chroma=0.18,
-                       skin_suppress=0.68, detail_suppress=0.30),
-            bloom=dict(radius=22.0, thr_lo=0.74, thr_hi=0.93,
-                       warmth=0.35, veil=0.0248),
-        ),
-        source='鹿井', calibrated=True,
+        # ★★ 真卷：走 spektrafilm 的物理链（负片 → 印相 → 扫描）。
+        #   颜色 / 影调 / 颗粒 / halation **全部由它自带** ⇒ 我们的 color/spatial 保持恒等、
+        #   且 pipeline 会**跳过** L1 影调 + L2 颜色 + 空间层。详见 `spektra.py`。
+        spek=dict(film='kodak_portra_400', print='kodak_portra_endura',
+                  pe=0.58),   # 落点标定：让五卷都落在中位 ~55
+        color=_c(), spatial=_s(),
+        source='spektrafilm', calibrated='物理',   # 负片+相纸官配
     ),
-
-    # ⚠ 唯一没标定的一卷（P2-11，09-13 评审保留项）：数据里没有"青绿粉彩"那条作者线
-    #   ⇒ 仍是**手写近似**（`calibrated=False`），别拿它当"Fuji Pro 400H 的真实还原"讲。
-    #   要名副其实只有两条路：① 路 A 真实色卡实拍标定；② 找到一位走"青绿粉彩"这条线的作者。
-    #   ⚠ 它也是七卷里唯一**没有指纹验收基线**的（落带检查对它是"参考"不是"结论"）。
-    'pro400h': dict(
-        name='pro400h', label=_LABEL['pro400h'][0], desc=_LABEL['pro400h'][1],
-        color=_c(a=-0.50, b=-1.60, b_sh=-1.20, b_hi=-0.40,
-                 chroma_p=1.020, chroma_s=0.900, contrast=0.970),
-        spatial=_s(
-            grain=dict(amount=0.018, size=1.1, chroma=0.16,
-                       skin_suppress=0.65, detail_suppress=0.30),
-            bloom=dict(radius=24.0, thr_lo=0.72, thr_hi=0.92,
-                       warmth=0.20, veil=0.040),
-        ),
-        source=None, calibrated=False,
-    ),
-
     'fuji_c200': dict(
         name='fuji_c200', label=_LABEL['fuji_c200'][0], desc=_LABEL['fuji_c200'][1],
-        color=_c(a=-0.44, b=-0.73, b_sh=+1.36, b_hi=+0.73,
-                 chroma_p=0.963, chroma_s=0.822, contrast=1.034),
-        spatial=_s(
-            grain=dict(amount=0.0355, size=1.3, chroma=0.24,
-                       skin_suppress=0.55, detail_suppress=0.25),
-            bloom=dict(radius=20.0, thr_lo=0.76, thr_hi=0.94,
-                       warmth=0.15, veil=0.0199),
-        ),
-        source='石田真澄', calibrated=True,
+        # ★★ 真卷：走 spektrafilm 的物理链（负片 → 印相 → 扫描）。
+        #   颜色 / 影调 / 颗粒 / halation **全部由它自带** ⇒ 我们的 color/spatial 保持恒等、
+        #   且 pipeline 会**跳过** L1 影调 + L2 颜色 + 空间层。详见 `spektra.py`。
+        spek=dict(film='fujifilm_c200', print='fujifilm_crystal_archive_typeii',
+                  pe=1.41),   # 落点标定：让五卷都落在中位 ~55
+        color=_c(), spatial=_s(),
+        source='spektrafilm', calibrated='物理',   # 
     ),
-
+    'pro400h': dict(
+        name='pro400h', label=_LABEL['pro400h'][0], desc=_LABEL['pro400h'][1],
+        # ★★ 真卷：走 spektrafilm 的物理链（负片 → 印相 → 扫描）。
+        #   颜色 / 影调 / 颗粒 / halation **全部由它自带** ⇒ 我们的 color/spatial 保持恒等、
+        #   且 pipeline 会**跳过** L1 影调 + L2 颜色 + 空间层。详见 `spektra.py`。
+        spek=dict(film='fujifilm_pro_400h', print='fujifilm_crystal_archive_typeii',
+                  pe=0.76),   # 落点标定：让五卷都落在中位 ~55
+        color=_c(), spatial=_s(),
+        source='spektrafilm', calibrated='物理',   # 
+    ),
     'ektar100': dict(
         name='ektar100', label=_LABEL['ektar100'][0], desc=_LABEL['ektar100'][1],
-        color=_c(a=+0.00, b=+2.81, b_sh=+0.46, b_hi=-2.81,
-                 chroma_p=1.107, chroma_s=1.202, contrast=1.040),
-        spatial=_s(
-            grain=dict(amount=0.0123, size=0.9, chroma=0.12,
-                       skin_suppress=0.70, detail_suppress=0.35),
-            bloom=dict(radius=18.0, thr_lo=0.80, thr_hi=0.96,
-                       warmth=0.20, veil=0.0149),
-        ),
-        source='川岛小鸟(仿拍)', calibrated=True,
+        # ★★ 真卷：走 spektrafilm 的物理链（负片 → 印相 → 扫描）。
+        #   颜色 / 影调 / 颗粒 / halation **全部由它自带** ⇒ 我们的 color/spatial 保持恒等、
+        #   且 pipeline 会**跳过** L1 影调 + L2 颜色 + 空间层。详见 `spektra.py`。
+        spek=dict(film='kodak_ektar_100', print='kodak_endura_premier',
+                  pe=0.81),   # 落点标定：让五卷都落在中位 ~55
+        color=_c(), spatial=_s(),
+        source='spektrafilm', calibrated='物理',   # 
     ),
-
     'cinestill800t': dict(
         name='cinestill800t', label=_LABEL['cinestill800t'][0], desc=_LABEL['cinestill800t'][1],
-        color=_c(a=+0.00, b=-0.75, b_sh=-0.00, b_hi=+2.90,
-                 chroma_p=0.944, chroma_s=0.878, contrast=0.940),
-        spatial=_s(
-            grain=dict(amount=0.0476, size=1.5, chroma=0.28,
-                       skin_suppress=0.50, detail_suppress=0.20),
-            bloom=dict(radius=22.0, thr_lo=0.74, thr_hi=0.93,
-                       warmth=0.30, veil=0.1200),
-            # 这一卷的招牌：高光往外散红橙晕圈（作者线雾量 0.32 = 全场最高，坐实）
-            halation=dict(amount=0.130, radius=18.0,
-                          thr_lo=0.78, thr_hi=0.99, color=[1.000, 0.300, 0.120]),
-        ),
-        source='MasashiWakui', calibrated=True,
-    ),
-
-    'air': dict(
-        name='air', label=_LABEL['air'][0], desc=_LABEL['air'][1],
-        color=_c(a=+0.00, b=-0.75, b_sh=+0.84, b_hi=+0.75,
-                 chroma_p=1.030, chroma_s=1.078, contrast=1.049),
-        spatial=_s(
-            grain=dict(amount=0.0062, size=1.0, chroma=0.10,
-                       skin_suppress=0.70, detail_suppress=0.40),
-            bloom=dict(radius=26.0, thr_lo=0.78, thr_hi=0.94,
-                       warmth=0.10, veil=0.0183),
-        ),
-        source='酒井貴弘', calibrated=True,
+        # ★★ 真卷：走 spektrafilm 的物理链（负片 → 印相 → 扫描）。
+        #   颜色 / 影调 / 颗粒 / halation **全部由它自带** ⇒ 我们的 color/spatial 保持恒等、
+        #   且 pipeline 会**跳过** L1 影调 + L2 颜色 + 空间层。详见 `spektra.py`。
+        spek=dict(film='kodak_vision3_500t', print='kodak_2383',
+                  pe=1.18),   # 落点标定：让五卷都落在中位 ~55
+        color=_c(), spatial=_s(),
+        source='spektrafilm', calibrated='物理',   # Cinestill 800T = Vision3 500T 去碳层
     ),
 }
 

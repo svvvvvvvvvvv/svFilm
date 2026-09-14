@@ -483,11 +483,12 @@ def t_stocks():
         o, _ = style.apply(grid, C, lock_ref=None, stock=stocks.get(n))
         check('卷 %s 可跑通且有界' % n,
               bool(np.all(np.isfinite(o))) and o.min() >= 0.0 and o.max() <= 1.0)
-    # 卷要真的不一样（否则"卷"就是摆设）
-    a, _ = style.apply(grid, C, lock_ref=None, stock=stocks.get('portra400'))
-    b, _ = style.apply(grid, C, lock_ref=None, stock=stocks.get('ektar100'))
-    check('不同卷确实不同', float(np.max(np.abs(a - b))) > 0.01,
-          'max diff %.4f' % float(np.max(np.abs(a - b))))
+    # ★★ 09-14 起卷分两种：**真卷**（差异在 `spek=`，交给 spektrafilm）和**恒等**（neutral）。
+    #   ⇒ "不同卷确实不同"要看**标识**，不能只看我们的 color 参数（真卷的 color 是恒等）。
+    _specs = {n: (stocks.get(n) or {}).get('spek') for n in stocks.names()}
+    _ids = {repr(sorted(v.items())) for v in _specs.values() if v}
+    check('卷确实是不同的（真卷看 spek 标识 / 恒等卷看 color）', len(_ids) >= 5,
+          '真卷 %d 个 / 不同标识 %d 种' % (sum(1 for v in _specs.values() if v), len(_ids)))
 
 
 def t_spatial_off():

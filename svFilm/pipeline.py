@@ -16,7 +16,7 @@ import time
 
 import numpy as np
 
-from . import analyze, color, config as C, denoise, guard, io, local, spatial, stocks, style, tone
+from . import analyze, color, config as C, denoise, guard, io, local, spatial, spektra, stocks, style, tone
 
 
 class Result:
@@ -110,7 +110,13 @@ def run_from(sample, cfg=C, stock=None, base=None, out=None, lut=None,
     # ★★ 位置由「脸」的锚点决定（09-14 SV 选「乙」）：由脸算一个曝光偏移，
     #   **把入口那条曲线整体重打**。不是"分区域压脸/压背景"—— 一条曲线、不用掩膜，
     #   背景的亮度是这条曲线算出来的**结果**。
-    d_ev, anc = io.anchor_ev(s.disp, cfg)
+    # ★★ 真卷（`spek=`）**不用锚点**：实测真卷自己就把脸放到 L* 78~86（比我们靶 68 还亮），
+    #   再提一遍就是过曝（中位 61 → 83）。⇒ 真卷模式下位置整段交给胶片。
+    _pre_spek = (st or {}).get('spek')
+    if _pre_spek and not bool(getattr(cfg, 'SPEK_ANCHOR', False)):
+        d_ev, anc = 0.0, dict(applied=False, reason='real_stock_真卷自己定曝光')
+    else:
+        d_ev, anc = io.anchor_ev(s.disp, cfg)
     _on = bool(anc.get('applied'))
     lin_in = io.refocus(s.lin, d_ev, cfg) if _on else s.lin
     if _on:
@@ -126,15 +132,32 @@ def run_from(sample, cfg=C, stock=None, base=None, out=None, lut=None,
 
     rep0 = analyze.analyze(lin_in, disp_in, s.kind)                  # L0
     # L1 影调修正（**只压不提**：提亮交给入口 settle + 脸锚点，兜底提亮那套 09-14 已删）
-    lin1, t_info = tone.correct(lin_in, rep0, cfg)                   # L1
-    disp1 = np.clip(color.l2s(np.clip(lin1, 0.0, 1.0)), 0.0, 1.0)
+    # ★★ 09-14 SV：「丢弃作者线，全部用真卷」。
+    #   真卷（带 `spek=` 标记）**自带完整 H&D 曲线** ⇒ 我们的 L1 影调修正要**让位**（不然是两条曲线串）。
+    _spek = (st or {}).get('spek')
+    if _spek:
+        lin1, t_info = lin_in, dict(applied=False, reason='real_stock_自带H&D曲线')
+        disp1 = disp_in
+    else:
+        lin1, t_info = tone.correct(lin_in, rep0, cfg)               # L1
+        disp1 = np.clip(color.l2s(np.clip(lin1, 0.0, 1.0)), 0.0, 1.0)
     disp1, d_info = denoise.apply(disp1, cfg)                        # 降噪（L1 之后、L2 之前）
 
     if lut is None and cfg.LUT_PATH:
         lut = style.cube_read(cfg.LUT_PATH)
     # 锁中灰的参照 = 修正层实际交出来的中灰（不是配置里的靶）
-    disp2, s_info = style.apply(disp1, cfg, lut=lut, lock_ref=style.mid_of(disp1),
-                                stock=st, base=base)
+    if _spek:
+        # ★★ L2 整段换成**真卷**：喂**场景线性**（`lin_in`），出显示域。
+        #   它自带 H&D + `dir_couplers`(彩度) + 染料；落点由 `SPEK_PRINT_EXPOSURE` 定。
+        # ★ 每卷一个 pe（09-14 标定：不同相纸响应不同 ⇒ 全局一个值会让富士卷偏亮 30 个 L*）
+        _pe = float(_spek.get('pe') or getattr(cfg, 'SPEK_PRINT_EXPOSURE', 0.55))
+        disp2 = spektra.render(lin_in, st['name'], cfg, print_exposure=_pe)
+        s_info = dict(applied=True, how='spektrafilm', stock=st['name'],
+                      film=_spek.get('film'), print=_spek.get('print'),
+                      print_exposure=_pe, tone_curve=False, film_color_w=0.0)
+    else:
+        disp2, s_info = style.apply(disp1, cfg, lut=lut, lock_ref=style.mid_of(disp1),
+                                    stock=st, base=base)
     # ★ 锚点**收尾**（09-14 SV 选「①」）：L1 那一步把脸放到靶上了，但 **L2 影调曲线又把它抬上去**
     #   （实测 +8.4 L*）⇒ 这里量一次脸、用**全局增益**把它挪回靶 ⇒ **最终脸真的落在靶上**。
     #   只在锚点真的动过（脸偏暗）时才做；仍是一条曲线，不分区。
@@ -144,7 +167,12 @@ def run_from(sample, cfg=C, stock=None, base=None, out=None, lut=None,
     # ⚠ 09-14 SV：「把脸部立体感的部分删掉」⇒ 原来在 L2 之后 / 空间层之后各插一道
     #   `local.face_tone`（第 4 条「每层护脸」），**已整段删除**。
     disp2r = disp2
-    disp2b, sp_info = spatial.apply(disp2, cfg, stock=st)            # 空间域（颗粒/黑柔/Halation）
+    if _spek:
+        # ★ 真卷自带的 grain / halation / glare 已经是物理级的（分通道、R 最强 ⇒ 红橙）
+        #   ⇒ 我们的空间层**必须让位**，不然是两套颗粒叠一起。
+        disp2b, sp_info = disp2, dict(applied=False, reason='real_stock_自带颗粒/halation')
+    else:
+        disp2b, sp_info = spatial.apply(disp2, cfg, stock=st)        # 空间域（颗粒/黑柔/Halation）
     disp2br = disp2b
     disp3, l_info = local.apply(disp1, disp2b, cfg)                  # L3
     disp4, g_info = guard.enforce(disp3, cfg)                        # L4
