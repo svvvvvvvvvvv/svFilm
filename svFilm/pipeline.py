@@ -146,6 +146,12 @@ def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=Fa
     # 锁中灰的参照 = 修正层实际交出来的中灰（不是配置里的靶）
     disp2, s_info = style.apply(disp1, cfg, lut=lut, lock_ref=style.mid_of(disp1),
                                 stock=st, base=base)
+    # ★ 锚点**收尾**（09-14 SV 选「①」）：L1 那一步把脸放到靶上了，但 **L2 影调曲线又把它抬上去**
+    #   （实测 +8.4 L*）⇒ 这里量一次脸、用**全局增益**把它挪回靶 ⇒ **最终脸真的落在靶上**。
+    #   只在锚点真的动过（脸偏暗）时才做；仍是一条曲线，不分区。
+    if _on and bool(getattr(cfg, 'ANCHOR_FINISH', True)):
+        disp2, _fin = io.finish_anchor(disp2, cfg)
+        anc['finish'] = _fin
     # ★ 第 4 条「每层护脸」（09-14 SV 拍板「乙」，靶 68）：L2 之后先护一道 ——
     #   影调曲线会把脸拉平；而真正的主力是后面的空间层（**黑柔 + 颗粒**，实测压掉脸跨度 17~31%），
     #   所以空间层之后还要再护一道。靶是**绝对值** ⇒ 后层压下去、下一道就补回来。

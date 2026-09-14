@@ -289,6 +289,43 @@ def anchor_ev(disp, cfg=C, masks=None):
     return d_ev, info
 
 
+def finish_anchor(disp, cfg=C, masks=None):
+    r"""锚点**收尾**：把**当前**画面里的脸挪到 `ANCHOR_FACE_L`（线性域乘一个**全局**增益）。
+
+    为什么需要：`anchor_ev` 那一步是在 **L1** 把脸放到靶上，但后面的 **L2 影调曲线会再把它抬上去**
+    （实测 +8.4 L\*）。这一步在 L2 之后量一次脸、把它挪回靶 ⇒ **最终脸真的落在靶上**。
+
+    仍然是"一条曲线"：**整张乘同一个增益**，不分区、不用掩膜决定力道（掩膜只用来**量**脸）。
+    """
+    info = dict(applied=False)
+    if masks is None:
+        try:
+            from . import face
+            masks = face.parse(np.clip(disp, 0.0, 1.0))['masks']
+        except Exception as e:                              # noqa: BLE001
+            info.update(reason='no_mask', err='%s: %s' % (type(e).__name__, e))
+            return disp, info
+    sel = np.asarray(masks.get('face_skin', 0.0)) > 0.5
+    n = int(sel.sum())
+    if n < int(getattr(cfg, 'ANCHOR_MIN_FACE_PX', 300)):
+        info.update(reason='no_face', n=n)
+        return disp, info
+    lin = color.s2l(np.clip(disp, 0.0, 1.0))
+    Y = color.Y_of(lin)
+    L = color.L_of_lin(Y)
+    Lf = float(np.median(L[sel]))
+    tgt = float(getattr(cfg, 'ANCHOR_FACE_L', 68.0))
+    tol = float(getattr(cfg, 'ANCHOR_FINISH_TOL_L', 0.6))
+    if abs(Lf - tgt) < tol:
+        info.update(reason='on_target', face_L=Lf)
+        return disp, info
+    k = float(color.lin_of_L(tgt)) / max(float(np.median(Y[sel])), 1e-9)
+    out = np.clip(color.l2s(np.clip(lin * k, 0.0, None)), 0.0, 1.0)
+    info.update(applied=True, face_L_before=Lf, face_L_target=tgt, gain=k,
+                n_face=n, clip_frac=float(np.mean(color.luma(np.clip(lin * k, 0, None)) > 1.0)))
+    return out, info
+
+
 def clip_guard(lin, cfg=C):
     """入口高光护栏：给入口增益设一个**只往下**的上限（按"允许裁切的像素比例"）。
 

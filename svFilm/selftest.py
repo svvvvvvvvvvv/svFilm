@@ -1379,6 +1379,18 @@ def t_l4_caps():
         d0, i0 = io.anchor_ev(img3, C, masks=dict(face_skin=np.zeros((8, 256), np.float32)))
         check('锚点：拿不到脸 ⇒ 0（逐位不变）', d0 == 0.0 and i0.get('applied') is False)
         check('锚点：refocus(lin, 0) 逐位等于 lin', bool(np.array_equal(io.refocus(color.s2l(img3), 0.0, C), color.s2l(img3))))
+        # ④b 收尾：把"当前脸"挪回靶（模拟 L2 之后脸被抬到 76.4 的情形）
+        img4 = np.full((8, 256, 3), 0.64, np.float32)
+        Lf4 = float(np.median(color.L_of_lin(color.Y_of(color.s2l(img4)))))
+        out4, fi = io.finish_anchor(img4, C, masks=dict(face_skin=fk))
+        La4 = float(np.median(color.L_of_lin(color.Y_of(color.s2l(out4)))))
+        check('锚点收尾：脸偏离靶 ⇒ 挪回靶（±0.6）', abs(La4 - 68.0) < 0.6,
+              '%.1f → %.2f' % (Lf4, La4))
+        check('锚点收尾：整张乘**同一个**增益（不分区）',
+              bool(np.allclose(out4[..., 0] / np.maximum(img4[..., 0], 1e-9),
+                               out4[..., 2] / np.maximum(img4[..., 2], 1e-9), atol=1e-4)))
+        out5, fi5 = io.finish_anchor(img4, C, masks=dict(face_skin=np.zeros((8, 256), np.float32)))
+        check('锚点收尾：拿不到脸 ⇒ 逐位不变', bool(np.array_equal(out5, img4)))
     finally:
         C.ANCHOR_EV_MAX = ao[1]
 
