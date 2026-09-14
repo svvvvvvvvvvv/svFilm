@@ -654,7 +654,7 @@ def t_local_skin_floor():
     lab3 = color.to_lab(o3)
     check('唇妆不被推红', abs(float(np.median(lab3[:, :20, 1])) - 22.0) < 0.1,
           'lip a*=%.2f' % float(np.median(lab3[:, :20, 1])))
-    check('同一张图里皮肤照补', float(np.median(lab3[:, 20:, 1])) > 15.0,
+    check('同一张图里皮肤照补', float(np.median(lab3[:, 20:, 1])) > cfg.SKIN_FLOOR_A * 0.97,
           'skin a*=%.2f' % float(np.median(lab3[:, 20:, 1])))
 
     # 粉衣服（a* 高于目标、b* 低于目标）：不该被"顺手推暖"
@@ -677,8 +677,8 @@ def t_local_skin_floor():
     lab6 = color.to_lab(o6)
     dk = float(np.median(lab6[32:, :, 1]))
     br = float(np.median(lab6[:32, :, 1]))
-    check('逐像素门：暗的半边照补', dk > 15.0, 'dark a*=%.2f' % dk)
-    check('逐像素门：亮的半边少补', br < 13.0, 'bright a*=%.2f' % br)
+    check('逐像素门：暗的半边照补', dk > cfg.SKIN_FLOOR_A * 0.97, 'dark a*=%.2f' % dk)
+    check('逐像素门：亮的半边少补', br < cfg.SKIN_FLOOR_A * 0.90, 'bright a*=%.2f' % br)
     check('逐像素门：门在 (0,1) 之间', 0.2 < i6['gate'] < 0.95, 'gate=%.3f' % i6['gate'])
 
     d3, li = local.apply(cold, cold, cfg)

@@ -117,7 +117,12 @@ def render(lin, stock_name, cfg=C, print_exposure=None):
         old_pe = p.enlarger.print_exposure
         old_ae = p.camera.auto_exposure
         old_np = p.enlarger.normalize_print_exposure
+        old_dc = p.film_render.dir_couplers.amount
         try:
+            # ★★ 浓淡旋钮（09-14 SV 选「A」）：层间抑制 = 彩度的物理来源。
+            #   1.0 是出厂物理值；我们实测全批偏高 79%（12.13 vs 鹿井 6.79）⇒ 取 `SPEK_COUPLERS`。
+            p.film_render.dir_couplers.amount = float(
+                getattr(cfg, 'SPEK_COUPLERS', old_dc))
             if print_exposure is not None:
                 p.camera.auto_exposure = False
                 p.enlarger.normalize_print_exposure = False
@@ -130,6 +135,7 @@ def render(lin, stock_name, cfg=C, print_exposure=None):
             p.enlarger.print_exposure = old_pe
             p.camera.auto_exposure = old_ae
             p.enlarger.normalize_print_exposure = old_np
+            p.film_render.dir_couplers.amount = old_dc
     return np.clip(np.asarray(out, np.float64), 0.0, 1.0)
 
 
