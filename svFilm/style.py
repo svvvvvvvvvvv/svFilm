@@ -239,12 +239,22 @@ def _builtin(disp, cfg, stock=None, base=None):
         lab[..., 0] = L
 
     if has_tint:
-        w = color.smoothstep(L, p['tint_lo'], p['tint_hi'])            # 0 = 暗部, 1 = 亮部
+        # ★★ 09-14 改口径（逐层追踪 + 14 张探针量出来的）：
+        #   `b` 的偏移改成按 **L\* 三点分段**：暗(`tint_lo`) / **中位(50)** / 亮(`tint_hi`)。
+        #   旧口径是 `smoothstep(L, 25, 90)` 加权 `(1-w)·b_sh + w·b_hi`，中位（L\*≈50~59）
+        #   落在"偏亮"那半 ⇒ 偏移被 `b + b_hi ≈ 0` 抵消掉。实测（14 探针 · BASE_FULL）：
+        #     需要在中位退黄 **−2.77**，旧公式只给 **−0.69** ⇒ 整张 b\* 中位 +3.18（大师 +0.75）。
+        #   新口径下**已经解出来的那些数一字不用改**（它们本来就是"各点相对中位"的差）：
+        #     暗部 b+b_sh = −2.77+1.28 = −1.49 ✓（需要 −1.49）
+        #     中位 b      = −2.77        ✓（需要 −2.77）
+        #     亮部 b+b_hi = −2.77+2.77 = 0 ✓（需要 0）
+        _x = np.array([float(p['tint_lo']), 50.0, float(p['tint_hi'])], np.float64)
+        _y = np.array([float(p['b_sh']), 0.0, float(p['b_hi'])], np.float64)
         _flo = tuple(getattr(cfg, 'TINT_FADE_LO', (2.0, 8.0)))
         _fhi = tuple(getattr(cfg, 'TINT_FADE_HI', (97.0, 100.0)))
         fade = color.smoothstep(L, _flo[0], _flo[1]) * (1.0 - color.smoothstep(L, _fhi[0], _fhi[1]))
         lab[..., 1] += p['a'] * fade
-        lab[..., 2] += (p['b'] + (1.0 - w) * p['b_sh'] + w * p['b_hi']) * fade
+        lab[..., 2] += (p['b'] + np.interp(L, _x, _y)) * fade
 
     if has_chroma:
         a2, b2 = lab[..., 1], lab[..., 2]
