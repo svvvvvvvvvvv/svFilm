@@ -1286,6 +1286,10 @@ def t_l4_caps():
           bool(np.allclose(guard._soft_cap_L(L, cap_f, soft, 0.0), L)))
 
     # ③ 合成图上真的生效（左半 = 脸·暗端，右半 = 背景·亮端）—— **在线性域**
+    # ⚠ 09-14 起出厂 `CAP_FACE_BG_ENABLE=False`（SV：「把脸和背景**分开**是个错误的方向」）
+    #   ⇒ 测这两道闸必须**显式打开**，测完还原。
+    _cb0 = bool(C.CAP_FACE_BG_ENABLE)
+    C.CAP_FACE_BG_ENABLE = True
     H, W = 64, 256
     g = np.linspace(0.0, 1.0, W, dtype=np.float32)
     img = np.stack([np.repeat(g[None, :], H, 0)] * 3, -1)      # 显示域 0→1 的灰阶
@@ -1332,6 +1336,42 @@ def t_l4_caps():
     out0, info0 = guard.cap_lin_face_bg(lin, img, C, masks=dict(face_skin=z, bg=z))
     check('掩膜为空 ⇒ 一个像素都不动（不做任何猜测）',
           info0.get('applied') is False and bool(np.array_equal(out0, lin)))
+    C.CAP_FACE_BG_ENABLE = _cb0           # 还原出厂（关）
+
+    # ④ ★★ 「脸的锚点决定位置」（09-14 SV 选「乙」）—— 一条曲线、不分区域
+    ao = (float(C.ANCHOR_FACE_L), float(C.ANCHOR_EV_MAX))
+    try:
+        check('锚点：出厂开着，靶 = 68（鹿井脸中位）',
+              bool(C.ANCHOR_ENABLE) is True and abs(ao[0] - 68.0) < 1e-9)
+        src_io = inspect.getsource(io.refocus)
+        check('锚点：位置是**重打入口那条曲线**（不是分区域压）——refocus 里用肩的正/逆函数',
+              '_shoulder_inv' in src_io and '_shoulder(' in src_io)
+        check('锚点：pipeline.run 里在 L0 分析**之前**就重打了（analyze 用的是 lin_in）',
+              'io.anchor_ev(s.disp, cfg)' in prun and 'lin_in' in prun)
+        # 闭式解自检：合成一张"脸在 ~46"的图（真实逆光片的脸就在这个量级），看重打后是否落到 68
+        # ⚠ 别用太暗的合成图：L* 在 Y<0.0089 时走**线性段**，立方根近似不成立，闭式解会偏。
+        C.ANCHOR_EV_MAX = 4.0
+        img3 = np.full((8, 256, 3), 0.4274, np.float32)          # 显示值 0.4274 ⇒ L* ≈ 46
+        fk = np.zeros((8, 256), np.float32); fk[:, :64] = 1.0
+        Lb = color.L_of_lin(color.Y_of(color.s2l(img3)))
+        Lf = float(np.median(Lb[0, :64]))
+        check('锚点：合成图的脸落在 46 量级（真实逆光片的脸就在这儿）',
+              44.0 < Lf < 49.0, 'L脸=%.1f' % Lf)
+        d, ai = io.anchor_ev(img3, C, masks=dict(face_skin=fk))
+        check('锚点：脸比 68 暗 ⇒ d_ev > 0（要提亮）', d > 0, 'd_ev=%+.3f' % d)
+        out = io.refocus(color.s2l(img3), d, C)
+        La = color.L_of_lin(color.Y_of(np.clip(out, 0.0, None)))
+        check('锚点：重打之后脸真的落到 68（±1.5）',
+              abs(float(np.median(La[0, :64])) - 68.0) < 1.5,
+              '%.2f' % float(np.median(La[0, :64])))
+        check('锚点：三通道同倍率（只改亮度、不改颜色）',
+              bool(np.allclose(out[..., 0] / np.maximum(color.s2l(img3)[..., 0], 1e-9),
+                               out[..., 2] / np.maximum(color.s2l(img3)[..., 2], 1e-9), atol=1e-6)))
+        d0, i0 = io.anchor_ev(img3, C, masks=dict(face_skin=np.zeros((8, 256), np.float32)))
+        check('锚点：拿不到脸 ⇒ 0（逐位不变）', d0 == 0.0 and i0.get('applied') is False)
+        check('锚点：refocus(lin, 0) 逐位等于 lin', bool(np.array_equal(io.refocus(color.s2l(img3), 0.0, C), color.s2l(img3))))
+    finally:
+        C.ANCHOR_EV_MAX = ao[1]
 
 
 def main():

@@ -122,9 +122,18 @@ def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=Fa
     st = _stock_of(stock, cfg)
     s = io.load(path, max_side or cfg.MAX_SIDE, src=src)
 
-    rep0 = analyze.analyze(s.lin, s.disp, s.kind)                    # L0
+    # ★★ 位置由「脸」的锚点决定（09-14 SV 选「乙」）：由脸算一个曝光偏移，
+    #   **把入口那条曲线整体重打**。不是"分区域压脸/压背景"—— 一条曲线、不用掩膜，
+    #   背景的亮度是这条曲线算出来的**结果**。
+    d_ev, anc = io.anchor_ev(s.disp, cfg)
+    _on = bool(anc.get('applied'))
+    lin_in = io.refocus(s.lin, d_ev, cfg) if _on else s.lin
+    disp_in = (np.clip(color.l2s(np.clip(lin_in, 0.0, None)), 0.0, 1.0)
+               if _on else s.disp)
+
+    rep0 = analyze.analyze(lin_in, disp_in, s.kind)                  # L0
     allow = _allow_lift(s, cfg, rep0)
-    lin1, t_info = tone.correct(s.lin, rep0, cfg, allow_lift=allow)   # L1
+    lin1, t_info = tone.correct(lin_in, rep0, cfg, allow_lift=allow)  # L1
     # ★ 两道「不许超过」（脸 ≤ 68 / 背景 ≤ 脸−17）—— **在 L1、线性域、转成显示之前**执行。
     #   SV 09-14 选「③」：放 L4 末端是在 L* 域做**减法** ⇒ 亮的减得多、暗的减得少
     #   ⇒ 把背景内部的跨度压扁 ⇒ 就是「一压背景就变灰」。线性域是**乘性**的（= 真减曝光）。
@@ -172,13 +181,14 @@ def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=Fa
         spatial=sp_info,
         local=l_info,
         face_guard=dict(after_style=fg1, after_spatial=fg2),
+        anchor=anc,
         face_bg_cap=cap_info,
         guard=g_info,
         ms=(time.perf_counter() - t0) * 1000.0,
     )
     if keep_stages:
         rep['stages'] = dict(
-            base=s.disp,            # 入口归一后的样子（RAW 就是线性直出）
+            base=disp_in,           # 入口归一后的样子（RAW 就是线性直出；锚点已重打过）
             after_tone=disp1,       # 做完 L1 影调修正 + 降噪
             after_style=disp2,      # 再过 L2 风格（含第 4 条护脸那道）
             after_spatial=disp2b,   # 再过空间域（含第 4 条护脸那道）

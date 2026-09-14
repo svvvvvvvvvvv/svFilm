@@ -209,6 +209,82 @@ def entry_tone(lin, ev, cfg=C, level=None):
     return lin * (y / Y)[..., np.newaxis]
 
 
+# ========== 「脸的锚点决定位置」＝ 把入口那条曲线**重打一个曝光偏移**（09-14 SV 选「乙」） ==========
+# 为什么能这么做：入口曲线上任意像素的输出**只依赖 `Y·2^ev`** ⇒ 想换一个 `ev`，
+# 不需要回到原始线性、更不需要重新解码 —— 把当前输出**反解回"过肩之前"**、乘上
+# `2^(γ·Δev)`、再正向过一次即可。**全程一条 1D 曲线、不分区域、不用掩膜。**
+
+def _shoulder(t, knee, ceil):
+    """入口的软肩（`entry_tone` 里那一段；**不含趾部**）。"""
+    d = max(float(ceil) - float(knee), 1e-6)
+    return np.where(t > knee, knee + d * (1.0 - np.exp(-(t - knee) / d)), t)
+
+
+def _shoulder_inv(y, knee, ceil):
+    """上面那条肩的**逆**（单调 ⇒ 可逆）。"""
+    d = max(float(ceil) - float(knee), 1e-6)
+    r = np.clip(1.0 - (np.asarray(y, np.float64) - knee) / d, 1e-9, None)
+    return np.where(y > knee, knee - d * np.log(r), y)
+
+
+def refocus(lin, d_ev, cfg=C):
+    r"""把入口那条曲线**整体重打 `d_ev` 档** —— 等价于"一开始就用 `ev + d_ev` 过入口"。
+
+    只动亮度、三通道乘同一个倍率（与 `entry_tone` 同契约）。
+    ⚠ 近似：反解时**忽略趾部**（趾部只作用于 `y < 0.84×中位` 的暗部；而锚点是按脸算的，
+    脸 / 背景 / 高光都在趾部之上）⇒ 暗部会有一点偏差，实测要报出来。
+    """
+    if abs(float(d_ev)) < 1e-6:
+        return lin
+    g = float(getattr(cfg, 'ENTRY_GAMMA', 1.0))
+    knee = float(getattr(cfg, 'ENTRY_KNEE', 1.0))
+    ceil = float(getattr(cfg, 'ENTRY_CEIL', 1.0))
+    Y = np.maximum(color.luma(np.clip(lin, 0.0, None)), 1e-9)
+    # 反解回"过肩之前" ⇒ 换 ev 等价于 t × 2^(γ·Δev) ⇒ 再正向过一次（肩部）
+    t = _shoulder_inv(Y, knee, ceil) * (2.0 ** (g * float(d_ev)))
+    t2 = _shoulder(np.maximum(t, 1e-9), knee, ceil)
+    return lin * (t2 / Y)[..., np.newaxis]
+
+
+def anchor_ev(disp, cfg=C, masks=None):
+    r"""由**脸**算出"位置"要补多少档 —— 让脸中位落到 `ANCHOR_FACE_L`。
+
+    闭式解（不拟合、不迭代）：入口曲线肩部以下 `显示线性 ∝ u^γ`（u = Y·2^ev），
+    而 `L*+16 ∝ Y^(1/3)` ⇒ `u ∝ (L*+16)^(3/γ)` ⇒
+
+        d_ev = (3/γ) · log2( (L_靶 + 16) / (L_脸 + 16) )
+
+    返回 `(d_ev, info)`。**拿不到脸 ⇒ 返回 0（逐位不变）。**
+    """
+    info = dict(applied=False)
+    if not bool(getattr(cfg, 'ANCHOR_ENABLE', True)):
+        info['reason'] = 'off'
+        return 0.0, info
+    if masks is None:
+        try:
+            from . import face
+            masks = face.parse(np.clip(disp, 0.0, 1.0))['masks']
+        except Exception as e:                              # noqa: BLE001
+            info.update(reason='no_mask', err='%s: %s' % (type(e).__name__, e))
+            return 0.0, info
+    sel = np.asarray(masks.get('face_skin', 0.0)) > 0.5
+    n = int(sel.sum())
+    if n < int(getattr(cfg, 'ANCHOR_MIN_FACE_PX', 300)):
+        info.update(reason='no_face', n=n)
+        return 0.0, info
+    lin = color.s2l(np.clip(disp, 0.0, 1.0))
+    L = color.L_of_lin(color.Y_of(lin))
+    Lf = float(np.median(L[sel]))
+    tgt = float(getattr(cfg, 'ANCHOR_FACE_L', 68.0))
+    g = max(float(getattr(cfg, 'ENTRY_GAMMA', 1.0)), 1e-6)
+    raw = (3.0 / g) * float(np.log2(max(tgt + 16.0, 1e-6) / max(Lf + 16.0, 1e-6)))
+    cap = float(getattr(cfg, 'ANCHOR_EV_MAX', 2.0))
+    d_ev = float(np.clip(raw, -cap, cap))
+    info.update(applied=True, face_L_before=Lf, face_L_target=tgt,
+                d_ev=d_ev, capped=bool(abs(raw) > cap), n_face=n)
+    return d_ev, info
+
+
 def clip_guard(lin, cfg=C):
     """入口高光护栏：给入口增益设一个**只往下**的上限（按"允许裁切的像素比例"）。
 
