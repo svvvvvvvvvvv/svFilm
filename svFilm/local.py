@@ -201,9 +201,12 @@ def face_tone(disp, cfg=C):
         return d, info
     Lb = float(np.median(L[sel]))
 
-    # ---- ① 位置：只提不压 ----
-    dL = float(np.clip(float(getattr(cfg, 'FACE_TGT_L', 62.0)) - Lb, 0.0,
-                       float(getattr(cfg, 'FACE_LIFT_MAX', 40.0))))
+    # ---- ① 位置：只提不压（★ 09-14 SV：「去掉人物的提亮」⇒ `FACE_LIFT_ENABLE=False` 直接跳过）----
+    #   关掉之后这一步恒等（`dL=0`），但 **② 形状（立体感 A1）照旧跑** —— 两件事分开。
+    dL = 0.0
+    if bool(getattr(cfg, 'FACE_LIFT_ENABLE', True)):
+        dL = float(np.clip(float(getattr(cfg, 'FACE_TGT_L', 62.0)) - Lb, 0.0,
+                           float(getattr(cfg, 'FACE_LIFT_MAX', 40.0))))
     L1 = (L + pw * dL) if dL > 1e-3 else L
 
     # ---- ② 形状：以脸中位为锚拉开已有的明暗（A1：各向同性，只放大已有的，不编光）----

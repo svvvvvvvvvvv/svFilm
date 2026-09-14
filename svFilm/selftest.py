@@ -1168,6 +1168,11 @@ def t_face_layer():
     check('① 位置靶 = 68（鹿井脸 L* 中位；「乙」把原来的 p25=62 换掉）',
           float(C.FACE_TGT_L) == 68.0, '%.1f' % C.FACE_TGT_L)
     check('第 4 条「每层护脸」出厂开着', C.FACE_GUARD_LAYERS is True)
+    # ★★ 09-14 SV：「去掉人物的提亮」⇒ 位置那一步整步跳过，但形状 A1 照旧
+    check('人物的提亮：出厂**关**（FACE_LIFT_ENABLE=False；形状 A1 不受影响）',
+          C.FACE_LIFT_ENABLE is False)
+    check('接线：提亮那一步真的读 FACE_LIFT_ENABLE（不是写死）',
+          'FACE_LIFT_ENABLE' in inspect.getsource(local.face_tone))
     # ② 接线：真的插了两道、真的读开关（不是"接了没通"）
     src = inspect.getsource(pipeline.run)
     check('接线：pipeline.run 里调了两次 local.face_tone（L2 后 / 空间层后）',
