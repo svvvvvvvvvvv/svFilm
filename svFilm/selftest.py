@@ -1108,7 +1108,9 @@ def t_anchor():
     src_io = inspect.getsource(io.refocus)
     check('锚点：位置是**重打入口那条曲线**（不是分区域压）—— refocus 里用肩的正/逆函数',
           '_shoulder_inv' in src_io and '_shoulder(' in src_io)
-    prun2 = inspect.getsource(pipeline.run)
+    # ⚠ 09-14 起 `run` = `io.load` + `run_from`（常驻服务要跳过解码）
+    #   ⇒ 这些**源码级**断言必须看 `run_from`（链逻辑搬过去了），不是 `run`。
+    prun2 = inspect.getsource(pipeline.run_from)
     check('锚点：pipeline.run 里在 L0 分析**之前**就重打了（analyze 用的是 lin_in）',
           'io.anchor_ev(s.disp, cfg)' in prun2 and 'lin_in' in prun2)
     check('锚点：收尾接在 L2（style.apply）之后',
@@ -1256,6 +1258,32 @@ def t_film_color():
     # ★★ 09-14 逐层追踪抓到的 bug：乙 会把**入口交出来的近白全部砍平**
     #   （实测 0304 12.63%→0、0774 15.76%→0），白区层次也被压 ⇒ 表现是"白的东西不白、发肉"。
     #   ⇒ 修法 = **乙 在高光端淡出**（高光交给入口 + 影调曲线）。这条守卫不许被"简化"掉。
+    # ★★ 09-14「引擎两条口子」的守护线（常驻服务靠这个才快得起来）
+    #   ① `run` 必须是 `io.load` + `run_from`（**一份实现、两条入口**）—— 不许各写一套；
+    #   ② `run_from` 不许自己调 `io.load`（那样缓存解码就白做了）。
+    #   ⚠ 先**去掉 docstring** 再查 —— 不然文档里提到的 "io.load()" 会误判（已踩过一次）
+    def _body(fn):
+        _t = inspect.getsource(fn)
+        _i = _t.find('\"\"\"')
+        if _i >= 0:
+            _j = _t.find('\"\"\"', _i + 3)
+            if _j > 0:
+                _t = _t[:_i] + _t[_j + 3:]
+        return _t
+    _run_src = _body(pipeline.run)
+    _from_src = _body(pipeline.run_from)
+    check('★★ 引擎口子：run = io.load + run_from（一份实现两条入口，不许各写一套）',
+          'io.load(' in _run_src and 'run_from(' in _run_src)
+    check('★★ 引擎口子：run_from 不许自己再调 io.load（缓存解码靠这条）',
+          'io.load(' not in _from_src)
+    #   ③ 常驻服务必须用 run_from（不是 run），否则每次都在重新解码
+    try:
+        from . import service as _svc
+        check('★ 引擎口子：常驻服务用的是 run_from（不是 run）',
+              'run_from(' in inspect.getsource(_svc))
+    except Exception as _e:                                    # noqa: BLE001
+        check('★ 引擎口子：常驻服务能 import', False)
+
     # ★★ 09-14 「脸的层次」重做（旧的 face_tone 同日删）—— 三条不许被"简化"掉：
     #   ① 权重必须是**真分割的 face_skin**（不是整个脸框）—— 那正是旧版把眉毛压黑的根因；
     #   ② 必须有**暗部下限** `FACE_BOT_CAP`（旧版只有亮部上限 ⇒ 眉毛一拉贴死）；

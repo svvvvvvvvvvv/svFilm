@@ -84,9 +84,28 @@ def _entry_bias(sample):
 
 def run(path, src=None, max_side=None, cfg=C, out=None, lut=None, keep_stages=False,
         stock=None, base=None):
+    """一次性：**解码 + 跑完整链**。常驻服务请用 `run_from`（跳过解码）。"""
     t0 = time.perf_counter()
-    st = _stock_of(stock, cfg)
     s = io.load(path, max_side or cfg.MAX_SIDE, src=src)
+    return run_from(s, cfg=cfg, stock=stock, base=base, out=out, lut=lut,
+                    keep_stages=keep_stages, t0=t0, path=path)
+
+
+def run_from(sample, cfg=C, stock=None, base=None, out=None, lut=None,
+             keep_stages=False, t0=None, path=None):
+    r"""★ 从**已经 load 好的** sample 起跑 —— 常驻服务的入口。
+
+    ★★ 为什么必须有它：实测 `io.load_raw` **一个人占全链 57%**
+    （700 长边：解码 1.911 s / 全链 3.357 s）⇒ **常驻 + 缓存 sample**
+    ⇒ 换一次卷从 3.36 s 降到 **1.45 s**（见 README「对外入口」）。
+    ⚠ **一份实现、两条入口**：`run()` = `io.load()` + `run_from()` —— 不许各写一套。
+
+    ⚠ 缓存的 sample 必须**同尺寸**（`io.load(..., max_side)` 的产物）；换尺寸要重新 load。
+    """
+    t0 = time.perf_counter() if t0 is None else t0
+    s = sample
+    path = path if path is not None else getattr(s, 'path', None)
+    st = _stock_of(stock, cfg)
 
     # ★★ 位置由「脸」的锚点决定（09-14 SV 选「乙」）：由脸算一个曝光偏移，
     #   **把入口那条曲线整体重打**。不是"分区域压脸/压背景"—— 一条曲线、不用掩膜，
