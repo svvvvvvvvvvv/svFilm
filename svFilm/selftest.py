@@ -1255,6 +1255,29 @@ def t_film_color():
           bool(np.allclose(mid, 0.45, atol=0.02)), str(np.round(mid, 4)))
     check('乙：透射率用 10^(−密度)（源码里就是这个式子，不是随手一条曲线）',
           '10.0 ** (-dens' in inspect.getsource(film.density))
+    # ★★ 跟卷走：`neutral` 卷必须把三块关掉（A/B 对照底要干净）
+    #   ⚠ 断言的**不是**"neutral = 原图"（neutral 继承基准成色 BASE_FULL，那本来就要动颜色），
+    #     而是"**neutral 把三块关掉了**"：它和"总强度 = 0"逐位相同。
+    import numpy as _np
+    g2 = _np.linspace(0.0, 1.0, 48).reshape(6, 8, 1).repeat(3, -1).astype(_np.float64)
+    _w0 = float(C.FILM_COLOR_W)
+    try:
+        _n = style._builtin(g2, C, stock=stocks.get('neutral'))
+        C.FILM_COLOR_W = 0.0
+        _n0 = style._builtin(g2, C, stock=stocks.get('neutral'))
+        _p = style._builtin(g2, C, stock=stocks.get('portra400'))
+        C.FILM_COLOR_W = 1.0
+        _p1 = style._builtin(g2, C, stock=stocks.get('portra400'))
+    finally:
+        C.FILM_COLOR_W = _w0
+    check('★ 跟卷走：neutral 卷把三块关掉了（= 与"总强度 0"逐位相同）',
+          float(_np.max(_np.abs(_n - _n0))) < 1e-12,
+          'maxΔ %.2e' % float(_np.max(_np.abs(_n - _n0))))
+    check('★ 跟卷走：portra400 卷**会**吃到三块（开/关不一样）',
+          float(_np.max(_np.abs(_p - _p1))) > 1e-3,
+          'maxΔ %.4f' % float(_np.max(_np.abs(_p - _p1))))
+    check('跟卷走：neutral 的 color 里显式有 film_color_w=0.0',
+          float((stocks.get('neutral').get('color') or {}).get('film_color_w', 1.0)) == 0.0)
     check('接线：style._builtin 里三块都接上了',
           all(k in inspect.getsource(style._builtin)
               for k in ('film.layer_speeds', 'film.crosstalk', 'film.density')))
@@ -1264,7 +1287,7 @@ def main():
     for fn in (t_color, t_analyze, t_tone_mid_target, t_tone_monotone, _legacy(t_style_lock),
                _legacy(t_style_contrast_direction), _legacy(t_style_tone_curve), _legacy(t_style_chroma_ends), t_denoise,
                t_guard, t_lut,
-               t_io_roundtrip, _legacy(t_stocks), t_spatial_off, t_spatial_grain,
+               t_io_roundtrip, t_stocks, t_spatial_off, t_spatial_grain,
                t_spatial_bloom_halation, t_local_skin_floor, t_entry_bias, t_pipeline_smoke,
                t_review_fixes, t_entry_settle, t_entry_toe, t_face_layer, t_anchor,
                t_film_color):

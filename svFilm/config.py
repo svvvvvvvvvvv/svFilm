@@ -387,6 +387,8 @@ BASE_TABLE = {
 # 真胶片的色偏是**从三条密度曲线 + 分通道片基底色里长出来的** —— 这两件事不一样。
 #
 # ---- 【丙】颜色串扰（三层乳剂的染料互相吸收）----
+# ★ 三块（丙/甲/乙）的**总强度**，可以跟卷走：`stocks.py` 里 `neutral` 显式给 0.0（恒等）。
+FILM_COLOR_W = 1.0           # 0 = 三块全关（逐位等于老颜色路）
 CROSSTALK_ENABLE = True
 CROSSTALK_AMOUNT = 0.38          # LIMO 给 Portra 400 标的值（0 = 恒等）
 CROSSTALK_CROSSOVERS = (0.25, 0.55, 0.88)   # 暗/中/亮 三段分界（LIMO `layerCrossovers`）

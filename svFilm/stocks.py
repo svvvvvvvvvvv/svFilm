@@ -53,19 +53,25 @@ _ID = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
 #   contrast    明度对比（只动 L*）    ← 尺子：反差 span90
 def _c(a=0.0, b=0.0, b_sh=0.0, b_hi=0.0, chroma_p=1.0, chroma_s=1.0, chroma_ref=20.0,
        contrast=1.0, tint_lo=25.0, tint_hi=90.0, matrix=None, chroma_ends=None,
-       tone_curve=None, tone_toe=None, tone_lift=None, tone_shoulder=None):
+       tone_curve=None, tone_toe=None, tone_lift=None, tone_shoulder=None,
+       film_color_w=None, density_stock=None):
     """`chroma_ends` = 抽色饱和（两端掉彩量）。None = 继承 config.CHROMA_ENDS；
     显式给 0.0 = 关（`neutral` 靠它保持恒等）。
 
     `tone_curve` / `tone_toe` / `tone_lift` / `tone_shoulder` = 胶片影调曲线（见 config.TONE_*）。
     None = 继承 config；显式给值 = 这一卷自己的影调性格（`neutral` 显式关掉以保恒等）。
+
+    `film_color_w` = **真胶片成色三块**（丙串扰 / 甲分通道 / 乙密度引擎，见 `film.py`）的总强度。
+    None = 继承 `config.FILM_COLOR_W`；**`neutral` 显式给 0.0** ⇒ 回到逐位恒等（A/B 对照底要干净）。
+    `density_stock` = 乙 用哪条实测曲线（None = `config.DENSITY_STOCK`）。
     """
     return dict(matrix=(matrix or _ID), a=a, b=b, b_sh=b_sh, b_hi=b_hi,
                 chroma_p=chroma_p, chroma_s=chroma_s, chroma_ref=chroma_ref,
                 contrast=contrast, tint_lo=tint_lo, tint_hi=tint_hi,
                 chroma_ends=chroma_ends,
                 tone_curve=tone_curve, tone_toe=tone_toe, tone_lift=tone_lift,
-                tone_shoulder=tone_shoulder)
+                tone_shoulder=tone_shoulder,
+                film_color_w=film_color_w, density_stock=density_stock)
 
 
 def _s(grain=None, bloom=None, halation=None):
@@ -87,7 +93,8 @@ def _s(grain=None, bloom=None, halation=None):
 TABLE = {
     'neutral': dict(
         name='neutral', label=_LABEL['neutral'][0], desc=_LABEL['neutral'][1],
-        color=_c(chroma_ends=0.0, tone_curve=False),   # 恒等：抽色饱和 + 影调曲线都关掉，保 A/B 对照底干净
+        color=_c(chroma_ends=0.0, tone_curve=False, film_color_w=0.0),
+        # ↑ 恒等：抽色饱和 + 影调曲线 + **真胶片成色三块** 全关掉，保 A/B 对照底干净
         spatial=_s(),
         source=None, calibrated=True,   # 恒等 = 无需标定
     ),
@@ -286,7 +293,11 @@ def color_params(cfg, stock, base=None):
              tone_toe=float(getattr(cfg, 'TONE_TOE', 0.0) or 0.0),
              tone_lift=float(getattr(cfg, 'TONE_LIFT', 0.0) or 0.0),
              tone_shoulder=float(getattr(cfg, 'TONE_SHOULDER', 0.0) or 0.0),
-             fog=b['b_fog'])
+             fog=b['b_fog'],
+             # ★ 真胶片成色三块（丙/甲/乙）的总强度 + 乙用哪条实测曲线。
+             #   None 的卷继承 config ⇒ 只有 `neutral` 显式给 0.0（恒等）。
+             film_color_w=float(getattr(cfg, 'FILM_COLOR_W', 1.0)),
+             density_stock=getattr(cfg, 'DENSITY_STOCK', 'portra400'))
     if stock:
         c = stock.get('color') or {}
         for k in ('matrix', 'tint_lo', 'tint_hi', 'chroma_ref'):
@@ -306,4 +317,9 @@ def color_params(cfg, stock, base=None):
         for k in ('chroma_p', 'chroma_s', 'contrast'):
             if k in c:
                 p[k] = p[k] * c[k]                     # 乘性相加
+        # ★ 真胶片成色三块：卷可显式给（`neutral` = 0.0 ⇒ 恒等）
+        if c.get('film_color_w') is not None:
+            p['film_color_w'] = float(c['film_color_w'])
+        if c.get('density_stock'):
+            p['density_stock'] = str(c['density_stock'])
     return p

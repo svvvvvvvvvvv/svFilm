@@ -191,23 +191,26 @@ def _builtin(disp, cfg, stock=None, base=None):
 
     # ★★ 09-14 新增三块（`film.py`）—— 【丙】串扰 / 【甲】分通道响应 / 【乙】密度引擎
     #   丙 甲 在**线性光**上做（物理上是乳剂与染料的耦合）；乙 直接产出完整成色。
-    _sp = bool(getattr(cfg, 'LAYER_SPEED_ENABLE', False))
-    _ct = bool(getattr(cfg, 'CROSSTALK_ENABLE', False))
+    #   ★ **整体强度跟卷走**（`p['film_color_w']`）：`neutral` 给 0.0 ⇒ 回到逐位恒等。
+    _fw = float(np.clip(p.get('film_color_w', 1.0), 0.0, 1.0))
+    _sp = bool(getattr(cfg, 'LAYER_SPEED_ENABLE', False)) and _fw > 0.0
+    _ct = bool(getattr(cfg, 'CROSSTALK_ENABLE', False)) and _fw > 0.0
     if _sp or _ct:
         _l = color.s2l(out)
         if _sp:
             _l = film.layer_speeds(_l, getattr(cfg, 'LAYER_SPEEDS', (1.0, 1.0, 1.0)),
-                                   getattr(cfg, 'LAYER_SPEED_STRENGTH', 1.0), cfg)
+                                   float(getattr(cfg, 'LAYER_SPEED_STRENGTH', 1.0)) * _fw, cfg)
         if _ct:
-            _l = film.crosstalk(_l, getattr(cfg, 'CROSSTALK_AMOUNT', 0.0),
+            _l = film.crosstalk(_l, float(getattr(cfg, 'CROSSTALK_AMOUNT', 0.0)) * _fw,
                                 getattr(cfg, 'CROSSTALK_CROSSOVERS', (0.25, 0.55, 0.88)), cfg)
         out = np.clip(color.l2s(np.clip(_l, 0.0, None)), 0.0, 1.0)
 
     _dens_w = 0.0
-    if bool(getattr(cfg, 'DENSITY_ENABLE', False)):
-        _dens_w = float(np.clip(getattr(cfg, 'DENSITY_STRENGTH', 1.0), 0.0, 1.0))
+    if bool(getattr(cfg, 'DENSITY_ENABLE', False)) and _fw > 0.0:
+        _dens_w = float(np.clip(getattr(cfg, 'DENSITY_STRENGTH', 1.0), 0.0, 1.0)) * _fw
         if _dens_w > 0.0:
-            _d = film.density(out, getattr(cfg, 'DENSITY_STOCK', 'portra400'), cfg=cfg)
+            _d = film.density(out, p.get('density_stock') or getattr(cfg, 'DENSITY_STOCK', 'portra400'),
+                              cfg=cfg)
             out = film.blend(out, _d, _dens_w)
 
     has_tone = _tone_on(p)
