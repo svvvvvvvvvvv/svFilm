@@ -1160,9 +1160,9 @@ def t_entry_toe():
 
 
 def t_face_layer():
-    """★ 脸层（L3）+ 第 4 条「每层护脸」+ 光方向（只量不改，09-14 撤掉"第二条线"）—— 全都不依赖模型。"""
+    """★ 脸层（L3）+ 第 4 条「每层护脸」—— 全都不依赖模型。"""
     import inspect
-    print('[脸层 · 每层护脸 · 光方向线]')
+    print('[脸层 · 每层护脸]')
     # ① 出厂值（SV 09-14 拍板「乙」：靶从 p25=62 提到中位 68）
     check('脸层出厂开着（09-13 已转正）', C.FACE_ENABLE is True)
     check('① 位置靶 = 68（鹿井脸 L* 中位；「乙」把原来的 p25=62 换掉）',
@@ -1179,220 +1179,72 @@ def t_face_layer():
           src.count('local.face_tone(') >= 2, 'count=%d' % src.count('local.face_tone('))
     check('接线：那道门读的是 FACE_GUARD_LAYERS（没有写死）',
           'FACE_GUARD_LAYERS' in inspect.getsource(pipeline._face_guard_on))
-    # ③ 线只有一条：形状放大只认跨度线 35；光方向那条线**只量**（09-14 撤掉了"当第二条线"）
+    # ③ 形状放大只认一条线：跨度线 35（09-14 SV：「光方向」那套已删）
     check('② 形状只认一条线：跨度线 = 35',
           float(C.FACE_TGT_SPAN) == 35.0, '%.1f' % C.FACE_TGT_SPAN)
-    check('② 光方向 = 只量不改：FACE_DIR_MEASURE 开着；参考线 0.060 "没方向"门 0.030 夹得住',
-          bool(C.FACE_DIR_MEASURE) is True
-          and 0.0 < float(C.FACE_DIR_MIN) < float(C.FACE_TGT_LRDIF),
-          'min=%.3f line=%.3f' % (C.FACE_DIR_MIN, C.FACE_TGT_LRDIF))
-
-    # ④ 光方向量测：合成脸，只改左右亮度 ⇒ 符号必须跟着走（这层真正的算法）
-    H = W = 400
-    gys, gxs = np.indices((H, W))
-    sel = (((gxs - 200.0) / 55.0) ** 2 + ((gys - 210.0) / 95.0) ** 2) <= 1.0
-    skin = sel.astype(np.float32)
-    ramp = np.clip((gxs - 200.0) / 55.0, -1.0, 1.0)              # −1 = 画面最左，+1 = 最右
-    a_flat = face.lr_asym(np.full((H, W), 60.0), skin, sel, cfg=C)
-    a_ramp = face.lr_asym(60.0 + 18.0 * ramp, skin, sel, cfg=C)   # 左暗右亮
-    a_rev = face.lr_asym(60.0 - 18.0 * ramp, skin, sel, cfg=C)    # 左亮右暗
-    check('光方向：平光脸的左右差 ≈ 0',
-          a_flat[0] is None or abs(a_flat[0]) < 0.01,
-          'asym=%s' % ('None' if a_flat[0] is None else '%.4f' % a_flat[0]))
-    check('光方向：左暗右亮 ⇒ asym > 0（画面右侧更亮）',
-          a_ramp[0] is not None and a_ramp[0] > 0.05,
-          'asym=%s n=%d' % ('None' if a_ramp[0] is None else '%.4f' % a_ramp[0], a_ramp[1]))
-    check('光方向：左右反过来 ⇒ asym 反号',
-          a_rev[0] is not None and a_rev[0] < -0.05,
-          'asym=%s' % ('None' if a_rev[0] is None else '%.4f' % a_rev[0]))
-    check('光方向：配对数不够 ⇒ 拒答（返回 None，不硬给一个方向）',
-          face.lr_asym(np.full((H, W), 60.0), skin, np.zeros((H, W), bool), cfg=C)[0] is None)
-    check('光方向：口径写在 docstring 里（量的是「哪半边脸更亮」，不是太阳在哪边）',
-          '哪半边脸更亮' in (face.lr_asym.__doc__ or ''))
-    # ⑤ 接线守卫：光方向那条线**不参与放大**（09-14 撤掉"第二条线"：k_dir/k_span 不许再出现）；
-    #    asym 只进 info；形状的 k 只由跨度线决定。
-    fs = inspect.getsource(local.face_tone)
-    check('光方向这条线不参与 k：源码里没有 k_dir / k_span（09-14 撤，DSCF2236 被炸到 69.4）',
-          'k_dir' not in fs and 'k_span' not in fs)
-    check('光方向：量出来写进 info（asym / n_pair / dir_how），且读 FACE_DIR_MEASURE 开关（不写死）',
-          fs.count('asym=asym') >= 2 and 'n_pair=n_pair' in fs and 'dir_how=dir_how' in fs
-          and 'FACE_DIR_MEASURE' in fs)
     check('形状的 k 只由跨度线决定（线 FACE_TGT_SPAN / 现状 span，夹在 [1, FACE_SPAN_KMAX]）',
-          'FACE_TGT_SPAN' in fs and 'FACE_SPAN_KMAX' in fs and 'FACE_TGT_LRDIF' not in fs)
+          'FACE_TGT_SPAN' in inspect.getsource(local.face_tone)
+          and 'FACE_SPAN_KMAX' in inspect.getsource(local.face_tone))
 
 
-def t_l4_caps():
-    r"""L4 那两道「不许超过」（09-14 SV 拍板）：**脸 ≤ 68**、**背景 ≤ 脸 − 17 = 51**。
+def t_anchor():
+    r"""★★ 「脸的锚点决定位置」（09-14 SV 选「乙/甲」）—— 一条曲线、不分区域、不用掩膜。
 
-    设计主线（SV 原话）＝「先锚点人脸会好看的亮度，再去算背景该有的亮度」
-    ⇒ 脸是**锚**，背景**由脸推算**，两个都只是**上限**，只压不提。
+    位置由脸算（闭式解），形状走入口那一条曲线；背景的亮度是**结果**不是另设的靶。
+    原先是写在 t_l4_caps 里的；两道区域闸删掉之后单独成一条。
     """
     import inspect
-    print('[L4 · 脸/背景 两道闸]')
-    cap_f = float(C.FACE_CAP_L)
-    cap_b = cap_f - float(C.BG_CAP_REL_L)
-    soft = float(C.CAP_SOFT_L)
-    src = inspect.getsource(guard.cap_lin_face_bg)
-    prun = inspect.getsource(pipeline.run)
+    print('[脸的锚点 · 位置]')
+    check('锚点：出厂开着，靶 = 68（鹿井脸中位）',
+          bool(C.ANCHOR_ENABLE) is True and float(C.ANCHOR_FACE_L) == 68.0)
+    check('锚点·只提不压：出厂为真（脸已经够亮就不动它）', bool(C.ANCHOR_ONLY_UP) is True)
+    check('锚点：收尾出厂开着（让**最终脸**落在靶上，不被 L2 又抬走）',
+          bool(C.ANCHOR_FINISH) is True)
+    src_io = inspect.getsource(io.refocus)
+    check('锚点：位置是**重打入口那条曲线**（不是分区域压）—— refocus 里用肩的正/逆函数',
+          '_shoulder_inv' in src_io and '_shoulder(' in src_io)
+    prun2 = inspect.getsource(pipeline.run)
+    check('锚点：pipeline.run 里在 L0 分析**之前**就重打了（analyze 用的是 lin_in）',
+          'io.anchor_ev(s.disp, cfg)' in prun2 and 'lin_in' in prun2)
+    check('锚点：收尾接在 L2（style.apply）之后',
+          'io.finish_anchor(' in prun2)
+    check('接线：两个开关都从 config 读（没写死）',
+          'ANCHOR_ONLY_UP' in inspect.getsource(io.anchor_ev))
 
-    # ① 出厂值与接线
-    check('脸上限 = 68（= 鹿井脸 L* 中位 67.9）', abs(cap_f - 68.0) < 1e-9, '%.1f' % cap_f)
-    check('背景上限 = 脸上限 − 17 = 51（不是独立靶，是**从脸算出来**的）',
-          abs(cap_b - 51.0) < 1e-9, '%.1f' % cap_b)
-    check('接线：两个上限都从 config 读（没写死在 guard 里）',
-          'FACE_CAP_L' in src and 'BG_CAP_REL_L' in src)
-    check('接线：开关读 CAP_FACE_BG_ENABLE', 'CAP_FACE_BG_ENABLE' in src)
-    # ★ 位置（09-14 SV 选「③」）：必须在 **L1、线性域、`disp1 = l2s(...)` 之前**。
-    #   在 L4 末端压 = 在 L* 域做减法 ⇒ 把背景内部的跨度压扁 ⇒ 「一压背景就变灰」。
-    i_cap = prun.find('cap_lin_face_bg(')
-    i_d1 = prun.find('disp1 = ')
-    check('位置：在 L1 线性域执行（pipeline.run 里 cap_lin_face_bg 排在 disp1=l2s 之前）',
-          i_cap > 0 and i_d1 > i_cap, 'cap@%d < disp1@%d' % (i_cap, i_d1))
-    check('位置：真的传的是 **lin1（线性）**，不是显示域的图',
-          'cap_lin_face_bg(lin1,' in prun)
-    #   ⚠ 只查"真的调用"（带 `guard.` 前缀 + 括号）—— enforce 的 docstring 里提到名字是正常的。
-    _se = inspect.getsource(guard.enforce)
-    check('位置：L4（guard.enforce）**不再**压脸/背景（已挪到 L1）',
-          'guard.cap_lin_face_bg(' not in _se and 'guard.cap_face_bg(' not in _se)
-
-    # ② `_soft_cap_L` 的数值行为 —— 这层真正的算法
-    L = np.array([20.0, 60.0, 68.0, 74.0, 90.0, 100.0])
-    sc = guard._soft_cap_L(L, cap_f, soft)
-    check('软压：低于上限的**一个都不动**（只压不提）', bool(np.allclose(sc[:2], L[:2])),
-          '%s' % np.round(sc[:2], 3))
-    check('软压：正好压在上限 ⇒ 不动（值与斜率都连续 ⇒ 压不出断层）',
-          abs(sc[2] - cap_f) < 1e-9, '%.4f' % sc[2])
-    check('软压：超上限的都被收回，且**没一刀切**（90 和 100 压完仍不一样）',
-          bool(sc[3] < L[3] and sc[4] < L[4] and sc[5] < L[5] and (sc[5] - sc[4]) > 1e-3),
-          '90→%.3f 100→%.3f' % (sc[4], sc[5]))
-    check('软压：再亮也到不了 上限+soft（是真上限，不是渐近无限的软塌）',
-          float(sc[-1]) <= cap_f + soft + 1e-9
-          and float(guard._soft_cap_L(np.array([1e6]), cap_f, soft)[0]) <= cap_f + soft,
-          '%.3f ≤ %.3f' % (sc[-1], cap_f + soft))
-    check('软压：单调不回头（压完还是越亮越亮）', bool(np.all(np.diff(sc) >= -1e-9)))
-
-    # ②b 力度（09-14：「背景压太多了」→ 压一半；09-14 早：逐层追踪找到**对齐大师 L90**的点）
-    # ★ 出厂 0.35，不是 0.5 —— 实测力度→L90：0.00→97/94/95、0.25→93/92/92、
-    #   **0.35→90.4/89.9/89.8**、0.50→86/86/86；大师真胶片 L90 = **90.0** ⇒ 0.35 三张全中。
-    check('力度出厂 = 0.35（对齐大师 L90=90.0 的那个点；1.0 = 全压，0.0 = 等于关闸）',
-          abs(float(C.CAP_STRENGTH) - 0.35) < 1e-9, '%.2f' % C.CAP_STRENGTH)
-    check('接线：力度从 config 读（没写死）', 'CAP_STRENGTH' in src)
-    pressed_full = L - guard._soft_cap_L(L, cap_f, soft, 1.0)
-    pressed_half = L - guard._soft_cap_L(L, cap_f, soft, 0.5)
-    check('力度 0.5 ⇒ 压掉的量正好是全压的一半（不是拍脑袋）',
-          bool(np.allclose(pressed_half[3:], 0.5 * pressed_full[3:], atol=1e-9)),
-          '全压 %s ／ 半压 %s' % (np.round(pressed_full[3:], 2), np.round(pressed_half[3:], 2)))
-    check('力度 0 ⇒ 一个像素都不动（等于关闸）',
-          bool(np.allclose(guard._soft_cap_L(L, cap_f, soft, 0.0), L)))
-
-    # ③ 合成图上真的生效（左半 = 脸·暗端，右半 = 背景·亮端）—— **在线性域**
-    # ⚠ 09-14 起出厂 `CAP_FACE_BG_ENABLE=False`（SV：「把脸和背景**分开**是个错误的方向」）
-    #   ⇒ 测这两道闸必须**显式打开**，测完还原。
-    _cb0 = bool(C.CAP_FACE_BG_ENABLE)
-    C.CAP_FACE_BG_ENABLE = True
-    H, W = 64, 256
-    g = np.linspace(0.0, 1.0, W, dtype=np.float32)
-    img = np.stack([np.repeat(g[None, :], H, 0)] * 3, -1)      # 显示域 0→1 的灰阶
-    lin = color.s2l(img)
-    mf = np.zeros((H, W), np.float32); mf[:, :W // 2] = 1.0
-    mb = np.zeros((H, W), np.float32); mb[:, W // 2:] = 1.0
-    msk = dict(face_skin=mf, bg=mb)
-    face_dark = np.zeros((H, W), bool); face_dark[:, :int(W * 0.25)] = True
-    bg_hi = np.zeros((H, W), bool); bg_hi[:, int(W * 0.75):] = True
-    Lb = color.L_of_lin(color.Y_of(lin))
-    _La = lambda l: color.L_of_lin(color.Y_of(np.clip(l, 0.0, None)))      # noqa: E731
-
-    out, _ = guard.cap_lin_face_bg(lin, img, C, masks=msk)     # 出厂力度 0.5
-    La = _La(out)
-    r = np.where(lin > 1e-6, out / np.maximum(lin, 1e-6), 1.0)
-    check('合成图·**乘性**：同一像素三个通道倍率一样（只改亮度，不改颜色）',
-          bool(np.allclose(r[..., 0], r[..., 1], atol=1e-6))
-          and bool(np.allclose(r[..., 0], r[..., 2], atol=1e-6)))
-    check('合成图·只往下压（倍率恒 ≤ 1）', float(np.max(r)) <= 1.0 + 1e-6,
-          'max %.6f' % float(np.max(r)))
-    check('合成图·脸：本来就暗的**一个像素都没动**（只压不提）',
-          bool(np.allclose(La[face_dark], Lb[face_dark], atol=0.05)),
-          'Δ 最大 %.4f' % float(np.max(np.abs(La[face_dark] - Lb[face_dark]))))
-    check('合成图·背景：超上限的被压下去（力度 %.2f）' % C.CAP_STRENGTH,
-          float(np.median(La[bg_hi])) < float(np.median(Lb[bg_hi])) - 1.0,
-          '%.2f → %.2f' % (float(np.median(Lb[bg_hi])), float(np.median(La[bg_hi]))))
-    # ⚠ 「再亮也到不了 上限+soft」**只在力度 1.0 时成立**（力度 <1 时只压超出量的一部分，
-    #    渐近线是"越来越亮但压得动"，本来就不是硬顶）⇒ 这条断言必须显式用 1.0 验，别守错世界。
-    _s0 = float(C.CAP_STRENGTH)
+    ao = float(C.ANCHOR_EV_MAX)
     try:
-        C.CAP_STRENGTH = 1.0
-        out1, _ = guard.cap_lin_face_bg(lin, img, C, masks=msk)
-        La1 = _La(out1)
-        check('力度 1.0（全压）⇒ 背景再亮也 ≤ 上限+soft（这时才是真上限）',
-              float(np.max(La1[bg_hi])) <= cap_b + soft + 0.5,
-              'max %.2f ≤ %.2f' % (float(np.max(La1[bg_hi])), cap_b + soft))
-        check('力度旋钮真的有用：1.0 比 0.5 压得更狠',
-              float(np.median(La1[bg_hi])) < float(np.median(La[bg_hi])) - 1.0,
-              '0.5→%.2f  1.0→%.2f' % (float(np.median(La[bg_hi])),
-                                       float(np.median(La1[bg_hi]))))
-    finally:
-        C.CAP_STRENGTH = _s0
-    z = np.zeros((H, W), np.float32)
-    out0, info0 = guard.cap_lin_face_bg(lin, img, C, masks=dict(face_skin=z, bg=z))
-    check('掩膜为空 ⇒ 一个像素都不动（不做任何猜测）',
-          info0.get('applied') is False and bool(np.array_equal(out0, lin)))
-    C.CAP_FACE_BG_ENABLE = _cb0           # 还原出厂（关）
-
-    # ④ ★★ 「脸的锚点决定位置」（09-14 SV 选「乙」）—— 一条曲线、不分区域
-    ao = (float(C.ANCHOR_FACE_L), float(C.ANCHOR_EV_MAX))
-    try:
-        check('锚点：出厂开着，靶 = 68（鹿井脸中位）',
-              bool(C.ANCHOR_ENABLE) is True and abs(ao[0] - 68.0) < 1e-9)
-        src_io = inspect.getsource(io.refocus)
-        check('锚点：位置是**重打入口那条曲线**（不是分区域压）——refocus 里用肩的正/逆函数',
-              '_shoulder_inv' in src_io and '_shoulder(' in src_io)
-        check('锚点：pipeline.run 里在 L0 分析**之前**就重打了（analyze 用的是 lin_in）',
-              'io.anchor_ev(s.disp, cfg)' in prun and 'lin_in' in prun)
-        # 闭式解自检：合成一张"脸在 ~46"的图（真实逆光片的脸就在这个量级），看重打后是否落到 68
-        # ⚠ 别用太暗的合成图：L* 在 Y<0.0089 时走**线性段**，立方根近似不成立，闭式解会偏。
         C.ANCHOR_EV_MAX = 4.0
+        # 闭式解：合成"脸在 ~46"的图（真实逆光片的脸就在这个量级）
+        # ⚠ 别用太暗的合成图：L* 在 Y<0.0089 时走**线性段**，立方根近似不成立。
         img3 = np.full((8, 256, 3), 0.4274, np.float32)          # 显示值 0.4274 ⇒ L* ≈ 46
         fk = np.zeros((8, 256), np.float32); fk[:, :64] = 1.0
-        Lb = color.L_of_lin(color.Y_of(color.s2l(img3)))
-        Lf = float(np.median(Lb[0, :64]))
-        check('锚点：合成图的脸落在 46 量级（真实逆光片的脸就在这儿）',
-              44.0 < Lf < 49.0, 'L脸=%.1f' % Lf)
+        Lf = float(np.median(color.L_of_lin(color.Y_of(color.s2l(img3)))[0, :64]))
+        check('锚点：合成图的脸落在 46 量级', 44.0 < Lf < 49.0, 'L脸=%.1f' % Lf)
         d, ai = io.anchor_ev(img3, C, masks=dict(face_skin=fk))
         check('锚点：脸比 68 暗 ⇒ d_ev > 0（要提亮）', d > 0, 'd_ev=%+.3f' % d)
-        # ★ 只提不压（SV 09-14 选「甲」）：脸已经够亮 ⇒ 0，逐位不变
-        bright = np.full((8, 256, 3), 0.72, np.float32)          # 显示值 0.72 ⇒ L* ≈ 88
-        Lb2 = float(np.median(color.L_of_lin(color.Y_of(color.s2l(bright)))))
-        d2, i2 = io.anchor_ev(bright, C, masks=dict(face_skin=fk))
-        check('锚点·只提不压：脸已经够亮（%.0f > 68）⇒ d_ev = 0，不压它' % Lb2,
-              d2 == 0.0 and i2.get('applied') is False,
-              'd_ev=%+.3f reason=%s' % (d2, i2.get('reason')))
-        check('接线：ANCHOR_ONLY_UP 出厂为真（不写死两个方向）',
-              bool(C.ANCHOR_ONLY_UP) is True and 'ANCHOR_ONLY_UP' in inspect.getsource(io.anchor_ev))
         out = io.refocus(color.s2l(img3), d, C)
-        La = color.L_of_lin(color.Y_of(np.clip(out, 0.0, None)))
-        check('锚点：重打之后脸真的落到 68（±1.5）',
-              abs(float(np.median(La[0, :64])) - 68.0) < 1.5,
-              '%.2f' % float(np.median(La[0, :64])))
+        La = float(np.median(color.L_of_lin(color.Y_of(np.clip(out, 0.0, None)))[0, :64]))
+        check('锚点：重打之后脸真的落到 68（±1.5）', abs(La - 68.0) < 1.5, '%.2f' % La)
         check('锚点：三通道同倍率（只改亮度、不改颜色）',
               bool(np.allclose(out[..., 0] / np.maximum(color.s2l(img3)[..., 0], 1e-9),
                                out[..., 2] / np.maximum(color.s2l(img3)[..., 2], 1e-9), atol=1e-6)))
+        bright = np.full((8, 256, 3), 0.72, np.float32)           # L* ≈ 88 ⇒ 已经在靶之上
+        Lb2 = float(np.median(color.L_of_lin(color.Y_of(color.s2l(bright)))))
+        d2, i2 = io.anchor_ev(bright, C, masks=dict(face_skin=fk))
+        check('锚点·只提不压：脸已经够亮（%.0f > 68）⇒ d_ev = 0' % Lb2,
+              d2 == 0.0 and i2.get('applied') is False, 'reason=%s' % i2.get('reason'))
         d0, i0 = io.anchor_ev(img3, C, masks=dict(face_skin=np.zeros((8, 256), np.float32)))
         check('锚点：拿不到脸 ⇒ 0（逐位不变）', d0 == 0.0 and i0.get('applied') is False)
-        check('锚点：refocus(lin, 0) 逐位等于 lin', bool(np.array_equal(io.refocus(color.s2l(img3), 0.0, C), color.s2l(img3))))
-        # ④b 收尾：把"当前脸"挪回靶（模拟 L2 之后脸被抬到 76.4 的情形）
-        img4 = np.full((8, 256, 3), 0.64, np.float32)
-        Lf4 = float(np.median(color.L_of_lin(color.Y_of(color.s2l(img4)))))
-        out4, fi = io.finish_anchor(img4, C, masks=dict(face_skin=fk))
-        La4 = float(np.median(color.L_of_lin(color.Y_of(color.s2l(out4)))))
-        check('锚点收尾：脸偏离靶 ⇒ 挪回靶（±0.6）', abs(La4 - 68.0) < 0.6,
-              '%.1f → %.2f' % (Lf4, La4))
-        check('锚点收尾：整张乘**同一个**增益（不分区）',
-              bool(np.allclose(out4[..., 0] / np.maximum(img4[..., 0], 1e-9),
-                               out4[..., 2] / np.maximum(img4[..., 2], 1e-9), atol=1e-4)))
-        out5, fi5 = io.finish_anchor(img4, C, masks=dict(face_skin=np.zeros((8, 256), np.float32)))
-        check('锚点收尾：拿不到脸 ⇒ 逐位不变', bool(np.array_equal(out5, img4)))
+        check('锚点：refocus(lin, 0) 逐位等于 lin',
+              bool(np.array_equal(io.refocus(color.s2l(img3), 0.0, C), color.s2l(img3))))
+        # 收尾：把"当前脸"挪回靶（模拟 L2 之后脸被抬到 ~76 的情形）
+        out4, _ = io.finish_anchor(img3, C, masks=dict(face_skin=fk))
+        La4 = float(np.median(color.L_of_lin(color.Y_of(color.s2l(out4)))[0, :64]))
+        check('锚点收尾：脸偏离靶 ⇒ 挪回靶（±0.6）', abs(La4 - 68.0) < 0.6, '%.2f' % La4)
+        out5, _ = io.finish_anchor(img3, C, masks=dict(face_skin=np.zeros((8, 256), np.float32)))
+        check('锚点收尾：拿不到脸 ⇒ 逐位不变', bool(np.array_equal(out5, img3)))
     finally:
-        C.ANCHOR_EV_MAX = ao[1]
+        C.ANCHOR_EV_MAX = ao
 
 
 def main():
@@ -1401,7 +1253,7 @@ def main():
                t_guard, t_lut,
                t_io_roundtrip, t_stocks, t_spatial_off, t_spatial_grain,
                t_spatial_bloom_halation, t_local_skin_floor, t_entry_bias, t_pipeline_smoke,
-               t_review_fixes, t_entry_settle, t_entry_toe, t_face_layer, t_l4_caps):
+               t_review_fixes, t_entry_settle, t_entry_toe, t_face_layer, t_anchor):
         fn()
     print('-' * 52)
     if FAIL:

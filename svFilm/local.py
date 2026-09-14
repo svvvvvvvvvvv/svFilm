@@ -141,12 +141,8 @@ def face_tone(disp, cfg=C):
          脸本来就在靶之上的片子（0791 脸 90.6 / 2328 脸 89.8）⇒ 补光量 = 0 ⇒ 一格不动。
       ② 形状：以**脸自己的中位**为锚，把已有的明暗拉开 `k = 线/现状`（≤2.4 倍），**不编光**。
          线只有一条 = 鹿井「脸内部跨度（框内皮肤 P90−P10）」的 p25 = **35**（`FACE_TGT_SPAN`）。
-         ⚠ **光方向（左右差）那条线只量、不参与放大**（`FACE_DIR_MEASURE`，09-14 定）。
-           09-14 试过把它当"形状的第二条线"（两条线取更高那个），实测**会把已经很立体的脸整张炸开**：
-           DSCF2236 跨度 44.8 → 69.4（它本来就远超 35 ⇒ 跨度那条不发力，全是方向那条干的），左右差几乎没动。
-           根因：那条线要的是**左右方向**的差，A1 的 k 却是**各向同性**放大 ⇒ 拿一个横向指标去拉总反差。
-           要用它只能"只放大左右那个分量"（= A2 编光，SV 已否）⇒ **这条线到此为止**。证据写在 `config.py`。
-         变亮那部分最多到 L\*97（不动暗部）。
+         ⚠ 变亮那部分最多到 L\*97（不动暗部）。**「光方向（左右差）」那套 09-14 已按 SV 要求删掉**
+         （它只量不改、从没参与过画面；要做的 A2「编光」SV 也已否）。
       ⚠ **顺序不可换**：形状的锚点（脸中位）必须在**位置定好之后**才取，否则锚点是错的。
     ★ 这一层会被 `pipeline.run` 在 **L2 之后 / 空间层之后 / L3** 各调一次
       （第 4 条「每层护脸」，`FACE_GUARD_LAYERS`）—— 因为把脸压平的主力是**黑柔 + 颗粒**，
@@ -214,24 +210,8 @@ def face_tone(disp, cfg=C):
     span = float(q90 - q10)
     k = float(np.clip(float(getattr(cfg, 'FACE_TGT_SPAN', 35.0)) / max(span, 1e-6),
                       1.0, float(getattr(cfg, 'FACE_SPAN_KMAX', 2.4))))
-    # ★ 光方向（左右差）：**只量、不改画面**。逐张把「哪半边脸更亮」记进 info，供将来用。
-    #   ⚠ 它**不参与 k** —— 09-14 试过把它当"形状的第二条线"，实测会把已经很立体的脸整张炸开
-    #   （DSCF2236 跨度 44.8 → 69.4，而左右差几乎没动）。根因：那条线要的是**左右方向**的差，
-    #   而这里的 k 是**各向同性**放大 ⇒ 拿一个横向指标去拉整张脸的总反差。证据与结论写在 config 那一段。
-    asym, n_pair, dir_how = None, 0, 'off'
-    if bool(getattr(cfg, 'FACE_DIR_MEASURE', True)):
-        try:
-            asym, n_pair, dir_how = face.lr_asym(
-                L1, st['masks']['face_skin'], sel,          # ★ 传"脸皮肤"那一类，别传 skin（skin = 脸+身体）
-                lm=(f or {}).get('lm'), box=(f or {}).get('box'),
-                eyed=(f or {}).get('eyed'), cfg=cfg)
-        except Exception:                                       # noqa: BLE001
-            asym, n_pair, dir_how = None, 0, 'err'
-        if asym is not None and abs(asym) < float(getattr(cfg, 'FACE_DIR_MIN', 0.030)):
-            asym = None                    # 量出来太小 ⇒ 认为"这张脸没方向" ⇒ **拒答**，不报方向
     if dL <= 1e-3 and k <= 1.0 + 1e-9:
-        info.update(reason='nothing_to_do', face_L=Lb, span=span, k=k, lift=0.0, how=how,
-                    asym=asym, n_pair=n_pair, dir_how=dir_how)
+        info.update(reason='nothing_to_do', face_L=Lb, span=span, k=k, lift=0.0, how=how)
         return d, info
     Ls = float(np.median(L1[sel]))
     cap = float(getattr(cfg, 'FACE_TOP_CAP', 97.0))
@@ -246,7 +226,7 @@ def face_tone(disp, cfg=C):
     if np.any(wsel):
         out[wsel] = color.retone_L(lin[wsel], L2[wsel])
     info.update(applied=True, how=how, face_L_before=Lb, face_L=Ls, lift=dL,
-                span=span, k=k, asym=asym, n_pair=n_pair, dir_how=dir_how,
+                span=span, k=k,
                 person_cov=float(np.mean(pw)), feather_cov=float(np.mean(w)))
     return out, info
 
