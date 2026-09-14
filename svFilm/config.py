@@ -381,6 +381,26 @@ BASE_TABLE = {
         chroma_p=0.913, chroma_s=0.959, contrast=1.048, fog=0.0),
 }
 
+# ========== 真胶片成色模型（09-14 SV：「按你的判断顺序 都做了」）==========
+# 实现在 `film.py`，带一份**真的 Kodak Portra 400 实测感光曲线**（`data/portra400_char.csv`）。
+# 动机：我们原来的颜色**全部在 Lab 感知色空间里"事后加偏移"**（暗部偏色、亮部偏色是手工设的两个数）；
+# 真胶片的色偏是**从三条密度曲线 + 分通道片基底色里长出来的** —— 这两件事不一样。
+#
+# ---- 【丙】颜色串扰（三层乳剂的染料互相吸收）----
+CROSSTALK_ENABLE = True
+CROSSTALK_AMOUNT = 0.38          # LIMO 给 Portra 400 标的值（0 = 恒等）
+CROSSTALK_CROSSOVERS = (0.25, 0.55, 0.88)   # 暗/中/亮 三段分界（LIMO `layerCrossovers`）
+# ---- 【甲】分通道响应（三层乳剂感光度不同）----
+LAYER_SPEED_ENABLE = True
+LAYER_SPEEDS = (0.96, 1.0, 1.03)  # R/G/B：红层稍慢、蓝层稍快（LIMO 给 Portra 400 的标定）
+LAYER_SPEED_STRENGTH = 1.0        # 朝 1.0 插值（0 = 恒等）
+# ---- 【乙】完整密度引擎（log 曝光 → 三条密度曲线 → 透射率）----
+DENSITY_ENABLE = True
+DENSITY_STOCK = 'portra400'      # 用哪条实测曲线（`data/stocks_measured/*.json` + `data/*_char.csv`）
+DENSITY_SCALAR = 0.60            # 密度缩放（Emulsifier 原值）
+DENSITY_STRENGTH = 0.35
+DENSITY_LOGE_SCALE = 0.8         # log 曝光轴缩放（≈ 印相反差）：把画面铺进胶片曲线的陡部
+
 # ========== 降噪（RAW 提亮后暗部色斑/噪点） ==========
 # 位置：L1 修正之后、L2 风格之前（此时噪点被影调放大出来，最该收拾）。
 # 原则：只在"暗部 + 平坦区"下手，边缘/细节区不动；用引导滤波（保边）逐通道做，

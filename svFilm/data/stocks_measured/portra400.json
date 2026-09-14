@@ -1,0 +1,22 @@
+{
+    "manufacturer": "Kodak",
+    "film_name": "PORTRA 400",
+    "properties": {
+        "film_type": "negative"
+    },
+    "density_anchors": {
+        "d_min": {
+            "r": 0.243,
+            "g": 0.656,
+            "b": 0.885
+        },
+        "d_max": {
+            "r": 2.361,
+            "g": 2.774,
+            "b": 3.003
+        }
+    },
+    "data_files": {
+        "characteristic_curve": "kodak_portra_400_char.csv"
+    }
+}

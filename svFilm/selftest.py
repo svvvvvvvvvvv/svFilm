@@ -10,7 +10,7 @@ import tempfile
 
 import numpy as np
 
-from . import (analyze, cameras, color, config as C, denoise, face, guard, io, local, metrics,
+from . import (analyze, cameras, color, config as C, denoise, face, film, guard, io, local, metrics,
                pipeline, rawmeta, spatial, stocks, style, tone)
 
 FAIL = []
@@ -1179,13 +1179,95 @@ def t_anchor():
         C.ANCHOR_EV_MAX = ao
 
 
+def _legacy(fn):
+    r"""把 `fn` 包一层：跑的时候**临时关掉 09-14 新增的三块颜色**（丙/甲/乙）。
+
+    为什么需要：那些"关掉 = 恒等""neutral = 恒等""只动 L*（a*/b* 不动）"的断言，
+    是按**老颜色路**（Lab 里事后加偏移）写的；而新三块是**故意要改颜色**的
+    （丙串扰 / 甲分通道 / 乙密度引擎）。测老路本身时把新的关掉，两边各自成立。
+    """
+    def w():
+        _o = (C.CROSSTALK_ENABLE, C.LAYER_SPEED_ENABLE, C.DENSITY_ENABLE)
+        try:
+            C.CROSSTALK_ENABLE = C.LAYER_SPEED_ENABLE = C.DENSITY_ENABLE = False
+            return fn()
+        finally:
+            (C.CROSSTALK_ENABLE, C.LAYER_SPEED_ENABLE, C.DENSITY_ENABLE) = _o
+    w.__name__ = getattr(fn, '__name__', 'wrapped')
+    return w
+
+
+def t_film_color():
+    """★ 09-14 新增三块颜色（`film.py`）：【丙】串扰 /【甲】分通道 /【乙】密度引擎。"""
+    import inspect
+    print('[真胶片成色：丙串扰 / 甲分通道 / 乙密度引擎]')
+    check('丙 串扰：出厂开着，强度 = LIMO 给 Portra 400 标的 0.38',
+          bool(C.CROSSTALK_ENABLE) is True and abs(float(C.CROSSTALK_AMOUNT) - 0.38) < 1e-9)
+    check('甲 分通道：出厂开着，层感光度 = LIMO 的 (0.96, 1.0, 1.03)',
+          bool(C.LAYER_SPEED_ENABLE) is True
+          and tuple(np.round(C.LAYER_SPEEDS, 3)) == (0.96, 1.0, 1.03))
+    check('乙 密度引擎：出厂开着；**按参考实现只混 ≤50%**（Emulsifier `opacity = strength×0.5`）',
+          bool(C.DENSITY_ENABLE) is True and 0.0 < float(C.DENSITY_STRENGTH) <= 0.5)
+
+    d = film.load_curve('portra400')
+    check('乙：曲线是真的 Kodak Portra 400（101 点，logE −4 → +1）',
+          d['logE'].shape[0] == 100 and abs(d['logE'].min() + 4.0) < 0.01
+          and abs(d['logE'].max() - 1.0) < 0.01, '%d 点' % d['logE'].size)
+    check('★ 乙：分通道底片密度（那就是负片的橙色片基，不是"加"上去的）'
+          'R 0.243 / G 0.656 / B 0.885',
+          bool(np.allclose(d['d_min'], [0.243, 0.656, 0.885], atol=1e-3)),
+          str(np.round(d['d_min'], 3)))
+
+    # 丙：会改颜色、且关掉即恒等
+    g = np.linspace(0.0, 1.0, 64).reshape(8, 8, 1).repeat(3, -1).astype(np.float64)
+    c0 = film.crosstalk(g, 0.0)
+    check('丙：amount=0 逐位恒等', bool(np.array_equal(c0, g)))
+    c1 = film.crosstalk(g, 0.38)
+    _lc = color.luma(g).mean()
+    check('丙：真的动了颜色，且**不是**整体提亮/压暗（通道之间在换，不是一起升降）',
+          float(np.max(np.abs(c1 - g))) > 1e-3
+          and abs(float(color.luma(c1).mean() - _lc)) < 0.05,
+          'maxΔ %.4f  亮度 %.4f→%.4f' % (float(np.max(np.abs(c1 - g))), _lc,
+                                        float(color.luma(c1).mean())))
+    check('丙：输出有界非负', bool(np.isfinite(c1).all()) and c1.min() >= -1e-9)
+
+    # 甲
+    s0 = film.layer_speeds(g, (0.96, 1.0, 1.03), 0.0)
+    check('甲：strength=0 逐位恒等', bool(np.array_equal(s0, g)))
+    s1 = film.layer_speeds(g, (0.96, 1.0, 1.03), 1.0)
+    # 实测方向：`rgb**(1/speeds)`，speed<1 ⇒ 指数>1 ⇒ 中间调更暗 ⇒ 这一档 R 最暗、B 最亮。
+    # （⚠ 符号与 LIMO 自述的"红层更柔"方向相反 —— 他们那个 `rgb` 的域和我们的显示域不同，
+    #   我们只保证"三通道响应不同"，方向以实测为准。）
+    check('甲：三通道真的走不同（实测 R < G < B，红层被压得最狠）',
+          s1[..., 0].mean() < s1[..., 1].mean() < s1[..., 2].mean(),
+          'R%.3f G%.3f B%.3f' % tuple(s1[..., i].mean() for i in range(3)))
+
+    # 乙：★ 中灰守恒 + 单调
+    m0 = film.density(np.array([[[0.45] * 3]]))[0, 0, 1]
+    check('★ 乙：中灰进 = 中灰出（印相机的分通道曝光解出来的，±0.02）',
+          abs(float(m0) - 0.45) < 0.02, '0.45 -> %.4f' % float(m0))
+    xs = np.linspace(0.01, 0.99, 160)
+    oo = film.density(xs.reshape(-1, 1, 1).repeat(3, -1))
+    check('乙：整条传递曲线单调不减（不翻）',
+          bool((np.diff(oo[:, 0, 1]) >= -1e-9).all()))
+    mid = film.density(np.array([[[0.45] * 3]]))[0, 0]
+    check('乙：三个通道的中灰都守恒（所以不会出一片红）',
+          bool(np.allclose(mid, 0.45, atol=0.02)), str(np.round(mid, 4)))
+    check('乙：透射率用 10^(−密度)（源码里就是这个式子，不是随手一条曲线）',
+          '10.0 ** (-dens' in inspect.getsource(film.density))
+    check('接线：style._builtin 里三块都接上了',
+          all(k in inspect.getsource(style._builtin)
+              for k in ('film.layer_speeds', 'film.crosstalk', 'film.density')))
+
+
 def main():
-    for fn in (t_color, t_analyze, t_tone_mid_target, t_tone_monotone, t_style_lock,
-               t_style_contrast_direction, t_style_tone_curve, t_style_chroma_ends, t_denoise,
+    for fn in (t_color, t_analyze, t_tone_mid_target, t_tone_monotone, _legacy(t_style_lock),
+               _legacy(t_style_contrast_direction), _legacy(t_style_tone_curve), _legacy(t_style_chroma_ends), t_denoise,
                t_guard, t_lut,
-               t_io_roundtrip, t_stocks, t_spatial_off, t_spatial_grain,
+               t_io_roundtrip, _legacy(t_stocks), t_spatial_off, t_spatial_grain,
                t_spatial_bloom_halation, t_local_skin_floor, t_entry_bias, t_pipeline_smoke,
-               t_review_fixes, t_entry_settle, t_entry_toe, t_face_layer, t_anchor):
+               t_review_fixes, t_entry_settle, t_entry_toe, t_face_layer, t_anchor,
+               t_film_color):
         fn()
     print('-' * 52)
     if FAIL:

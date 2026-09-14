@@ -18,6 +18,7 @@ import numpy as np
 
 from . import color
 from . import config as C
+from . import film
 from . import stocks
 from . import tone
 
@@ -187,6 +188,27 @@ def _builtin(disp, cfg, stock=None, base=None):
     if not np.allclose(M, np.eye(3), atol=1e-9):
         lin = lin @ M.T
     out = np.clip(color.l2s(np.clip(lin, 0.0, None)), 0.0, 1.0)
+
+    # ★★ 09-14 新增三块（`film.py`）—— 【丙】串扰 / 【甲】分通道响应 / 【乙】密度引擎
+    #   丙 甲 在**线性光**上做（物理上是乳剂与染料的耦合）；乙 直接产出完整成色。
+    _sp = bool(getattr(cfg, 'LAYER_SPEED_ENABLE', False))
+    _ct = bool(getattr(cfg, 'CROSSTALK_ENABLE', False))
+    if _sp or _ct:
+        _l = color.s2l(out)
+        if _sp:
+            _l = film.layer_speeds(_l, getattr(cfg, 'LAYER_SPEEDS', (1.0, 1.0, 1.0)),
+                                   getattr(cfg, 'LAYER_SPEED_STRENGTH', 1.0), cfg)
+        if _ct:
+            _l = film.crosstalk(_l, getattr(cfg, 'CROSSTALK_AMOUNT', 0.0),
+                                getattr(cfg, 'CROSSTALK_CROSSOVERS', (0.25, 0.55, 0.88)), cfg)
+        out = np.clip(color.l2s(np.clip(_l, 0.0, None)), 0.0, 1.0)
+
+    _dens_w = 0.0
+    if bool(getattr(cfg, 'DENSITY_ENABLE', False)):
+        _dens_w = float(np.clip(getattr(cfg, 'DENSITY_STRENGTH', 1.0), 0.0, 1.0))
+        if _dens_w > 0.0:
+            _d = film.density(out, getattr(cfg, 'DENSITY_STOCK', 'portra400'), cfg=cfg)
+            out = film.blend(out, _d, _dens_w)
 
     has_tone = _tone_on(p)
     has_tint = (abs(p['a']) + abs(p['b']) + abs(p['b_sh']) + abs(p['b_hi'])) > 1e-6
