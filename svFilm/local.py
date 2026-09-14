@@ -153,6 +153,59 @@ def white_micro(disp, cfg=C, amount=0.0):
                      gain=gain, sigma=_sig2, top=top)
 
 
+def face_depth(disp, cfg=C):
+    r"""★ 09-14 重做「脸的层次」—— **只作用皮肤 + 暗部有底 + 死区**。
+
+    旧的那版（`face_tone`，同日删除）翻车在三条（`_debug/lab_face_dark.py` 实测）：
+      ① 力道**按整个脸框**下 ⇒ 框里的皮肤、眉毛、眼睛、**头发一起被拉开**；
+      ② **只封亮部**（`FACE_TOP_CAP` L\*97）、**暗部一个底都没有** ⇒ 本来就深的眉毛一拉贴死
+         （0830 最暗一档 5.2 → **2.3**，压掉一半）；
+      ③ `k` 由**皮肤**跨度算 —— 皮肤被黑柔+颗粒压平 ⇒ k 变大 ⇒ 皮肤没拉够、眉毛被拉过头。
+    这一版一条对一条地改：
+      ① 权重 = **真分割的 `face_skin`**（羽化）⇒ 眉毛/眼睛/头发**一个像素不碰**；
+      ② 亮部封顶之外**再补一条暗部下限**（`FACE_BOT_CAP`）；
+      ③ **死区**（`FACE_DEPTH_DEAD`）：跨度够就不动；
+      ④ 排在**空间层之后**（黑柔+颗粒才是压平脸的主力，得在它后面补）；
+      ⑤ 只**放大已有**的明暗（A1），**不编光** —— SV 拍的是逆光/明暗交界，脸本身有明暗。
+    靶 `FACE_TGT_SPAN` = 鹿井 26 张的「脸内部跨度」p25 = 35。
+    ⇒ ★ 理由：**"跨度"是形状量、不是位置量** —— 位置跨场景不可比，**形状可以抄**（跟影调同一条线）。
+    """
+    if not bool(getattr(cfg, 'FACE_DEPTH_ENABLE', False)):
+        return disp, dict(applied=False, reason='off')
+    import cv2
+    from . import face as _face
+    d = np.clip(disp, 0.0, 1.0)
+    try:
+        sk = np.asarray(_face.parse(d)['masks']['face_skin'], np.float32)
+    except Exception as e:                                   # noqa: BLE001
+        return disp, dict(applied=False, reason='parse_fail', err=str(e)[:60])
+    sel = sk > 0.5
+    if int(sel.sum()) < int(getattr(cfg, 'FACE_DEPTH_MIN_PX', 300)):
+        return disp, dict(applied=False, reason='no_skin', n=int(sel.sum()))
+    lab = color.to_lab(d)
+    L = lab[..., 0].astype(np.float64)
+    Ls = float(np.median(L[sel]))
+    span = float(np.percentile(L[sel], 90) - np.percentile(L[sel], 10))
+    tgt = float(getattr(cfg, 'FACE_TGT_SPAN', 35.0))
+    dead = float(getattr(cfg, 'FACE_DEPTH_DEAD', 0.90))
+    if span >= tgt * dead:
+        return disp, dict(applied=False, reason='span_ok', span=span, target=tgt)
+    k = float(np.clip(tgt / max(span, 1e-6), 1.0, float(getattr(cfg, 'FACE_SPAN_KMAX', 2.0))))
+    Lx = Ls + k * (L - Ls)
+    top = float(getattr(cfg, 'FACE_TOP_CAP', 97.0))
+    bot = float(getattr(cfg, 'FACE_BOT_CAP', 12.0))
+    Lx = np.where(Lx > L, np.minimum(Lx, np.maximum(L, top)), Lx)      # 变亮：封顶
+    Lx = np.where(Lx < L, np.maximum(Lx, np.minimum(L, bot)), Lx)      # 变暗：封底
+    _h, _w = L.shape
+    sig = max(2.0, float(getattr(cfg, 'FACE_DEPTH_FEATHER_REL', 0.02)) * _w)
+    w = np.clip(cv2.GaussianBlur(sk, (0, 0), sig), 0.0, 1.0)
+    lab[..., 0] = np.clip(L + w * (Lx - L), 0.0, 100.0)
+    out = np.clip(color.from_lab(lab), 0.0, 1.0)
+    return out, dict(applied=True, span_before=round(span, 2), span_target=tgt,
+                     k=round(k, 3), skin_px=int(sel.sum()), face_med=round(Ls, 1),
+                     top=top, bot=bot)
+
+
 def apply(ref_disp, disp, cfg=C):
     """ref_disp = L1 修正后的成片；disp = 当前（过完风格 + 空间域）的成片。"""
     out = np.clip(disp, 0.0, 1.0)
@@ -165,8 +218,11 @@ def apply(ref_disp, disp, cfg=C):
     if getattr(cfg, 'SKIN_FLOOR', False):
         out, finfo = skin_floor(out, cfg)
         info['skin_floor'] = finfo
-    # ★ 09-14 SV 选「丙」：白区微反差（排在**空间层之后**，补回被黑柔磨掉的那一层）
+    # ★ 09-14 SV 选「C」：白区微反差（补回被黑柔磨掉的那一层）
     _wm = float(getattr(cfg, 'WHITE_MICRO', 0.0) or 0.0)
     out, winfo = white_micro(out, cfg, _wm)
     info['white_micro'] = winfo
+    # ★★ 09-14 重做「脸的层次」：排在**空间层之后**（黑柔+颗粒才是压平脸的主力）
+    out, dinfo = face_depth(out, cfg)
+    info['face_depth'] = dinfo
     return out, info

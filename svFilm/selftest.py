@@ -1256,6 +1256,19 @@ def t_film_color():
     # ★★ 09-14 逐层追踪抓到的 bug：乙 会把**入口交出来的近白全部砍平**
     #   （实测 0304 12.63%→0、0774 15.76%→0），白区层次也被压 ⇒ 表现是"白的东西不白、发肉"。
     #   ⇒ 修法 = **乙 在高光端淡出**（高光交给入口 + 影调曲线）。这条守卫不许被"简化"掉。
+    # ★★ 09-14 「脸的层次」重做（旧的 face_tone 同日删）—— 三条不许被"简化"掉：
+    #   ① 权重必须是**真分割的 face_skin**（不是整个脸框）—— 那正是旧版把眉毛压黑的根因；
+    #   ② 必须有**暗部下限** `FACE_BOT_CAP`（旧版只有亮部上限 ⇒ 眉毛一拉贴死）；
+    #   ③ 必须有**死区**（跨度够就不动）。
+    _fd = inspect.getsource(local.face_depth)
+    check('★★ 脸的层次：力道只落 face_skin（不是整个脸框）',
+          "masks']['face_skin'" in _fd or "'face_skin'" in _fd)
+    check('★★ 脸的层次：必须有暗部下限 FACE_BOT_CAP（旧版没这条 ⇒ 眉毛贴死黑）',
+          'FACE_BOT_CAP' in _fd and float(getattr(C, 'FACE_BOT_CAP', 0.0)) > 0.0)
+    check('★ 脸的层次：必须有死区（跨度够就不动）',
+          'FACE_DEPTH_DEAD' in _fd)
+    check('★ 脸的层次：排在 L3 末尾（空间层之后才补）',
+          'face_depth' in inspect.getsource(local.apply))
     _src = inspect.getsource(style._builtin)
     check('★ 乙 在高光端淡出（DENSITY_FADE_LO/HI + blend_map）—— 不许砍平近白',
           'DENSITY_FADE_LO' in _src and 'blend_map' in _src
