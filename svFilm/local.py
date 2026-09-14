@@ -109,6 +109,50 @@ def skin_floor(disp, cfg=C):
     return out, info
 
 
+def white_micro(disp, cfg=C, amount=0.0):
+    r"""★ 09-14 SV 选「丙」：给**白区**补回一点中尺度微反差。
+
+    为什么单独写这一道：`_debug/lab_ours_vs_lujing.py` 量到我们的**白区层次**
+    （近白 + 低彩那块的中尺度局部对比 σ4）只有 **1.34**，鹿井那边 **4.69**。
+    逐层追踪查明：**我们真正磨掉的只有 0.41**（入口 1.75 → 成片 1.34），
+    而且**磨得最多的是空间层（黑柔）**；剩下 3.35 是**内容差**
+    （鹿井的"白"是天空/阳光下的白墙，天生有层次）。
+
+    ⇒ 所以这道是**"照大师的数值去补"**，不是修 bug。**amount 可调**：
+        0.0 = 不动（白区层次保持 1.34）
+        ~0.5 = 折中
+        1.0 = 追满（把白区层次往 4.69 推）
+
+    ⚠ 只动 **L\***，不碰 a/b（不脏色）；只落在**白区掩膜**里（近白 + 低彩，羽化）；
+    并且**高光不许吹白**（`WHITE_MICRO_TOP` 封顶）。
+    """
+    if amount <= 1e-4:
+        return disp, dict(applied=False, reason='off', amount=amount)
+    import cv2
+    lab = color.to_lab(np.clip(disp, 0.0, 1.0))
+    L = lab[..., 0]
+    C = np.sqrt(lab[..., 1] ** 2 + lab[..., 2] ** 2)
+    L_lo = float(getattr(cfg, 'WHITE_MICRO_L', 82.0))       # 白区下界（L*）
+    C_hi = float(getattr(cfg, 'WHITE_MICRO_C', 12.0))       # 白区彩度上限
+    sel = ((L >= L_lo) & (C <= C_hi)).astype(np.float32)
+    if float(sel.mean()) < 1e-4:
+        return disp, dict(applied=False, reason='no_white', amount=amount)
+    _h, _w = L.shape
+    _sig = max(3.0, float(getattr(cfg, 'WHITE_MICRO_FEATHER_REL', 0.02)) * _w)
+    w = cv2.GaussianBlur(sel, (0, 0), _sig)
+    _sig2 = float(getattr(cfg, 'WHITE_MICRO_SIGMA', 4.0))
+    detail = L.astype(np.float32) - cv2.GaussianBlur(L.astype(np.float32), (0, 0), _sig2)
+    _mx = float(getattr(cfg, 'WHITE_MICRO_MAX', 6.0))
+    gain = float(np.clip(amount, 0.0, 2.0)) * float(getattr(cfg, 'WHITE_MICRO_AMT', 1.6))
+    d = np.clip(detail * gain, -_mx, _mx)
+    top = float(getattr(cfg, 'WHITE_MICRO_TOP', 99.0))
+    L2 = np.clip(L + w * d, 0.0, top)
+    lab[..., 0] = L2
+    out = np.clip(color.from_lab(lab), 0.0, 1.0)
+    return out, dict(applied=True, amount=amount, white_cov=float(sel.mean()),
+                     gain=gain, sigma=_sig2, top=top)
+
+
 def apply(ref_disp, disp, cfg=C):
     """ref_disp = L1 修正后的成片；disp = 当前（过完风格 + 空间域）的成片。"""
     out = np.clip(disp, 0.0, 1.0)
@@ -121,5 +165,8 @@ def apply(ref_disp, disp, cfg=C):
     if getattr(cfg, 'SKIN_FLOOR', False):
         out, finfo = skin_floor(out, cfg)
         info['skin_floor'] = finfo
-    # ★ 09-14 SV：「把脸部立体感的部分删掉」⇒ 这一层不再动明度，只有上面两道（肤色下限 / 保护）。
+    # ★ 09-14 SV 选「丙」：白区微反差（排在**空间层之后**，补回被黑柔磨掉的那一层）
+    _wm = float(getattr(cfg, 'WHITE_MICRO', 0.0) or 0.0)
+    out, winfo = white_micro(out, cfg, _wm)
+    info['white_micro'] = winfo
     return out, info
