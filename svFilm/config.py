@@ -636,6 +636,87 @@ SPEK_ANCHOR = False
 #   ⚠ 0.0 = **把这道物理过程整段关掉**；想留一点痕迹就取 0.3（≈7.8，几乎同效）。
 SPEK_COUPLERS = 0.0
 
+# ---- ★★ spektrafilm「自带但出厂关着」的暗房/光学效果（09-14 SV：「都打开」）----
+# 每项都注明：① 它到底是什么 ② 为什么出厂关 ③ 打开会改什么 ④ 我们取什么值。
+# ⚠ 三项「开关即空操作」：morph / boost_ev / preflash 出厂是**恒等或零**，
+#   光把 active 打开等于没开 —— **必须同时给非零值**，所以配置在这里就带上值。
+
+# ① 印相曲线变形（`print_render.density_curves_morph`）
+#   是什么：改**相纸特征曲线的形状**（不是套 LUT）。数学上 `σ'=σ/g`、`μ'=μ/g`、`A'=A`
+#     ⇒ **保 D(0)、保最大密度、保每层 A**、唯独把曲线在 logE 轴上"压缩/拉伸"。
+#     `g>1` = 曲线变陡（反差略提）+ 层次往亮部靠；按**颗粒速度**分层（快层乘 fast、慢层乘 slow）。
+#   为什么关：全 1.0 时数学上 **bit-exact 恒等**（源码原话）⇒ 出厂默认 active=False。
+#   打开会改什么：相纸反差/层次分布；**同时乘 `develop_print_morph` 的 gamma_factor=1.0** ⇒ 不会二次叠。
+#   我们取值（SV 选「轻档」）：gamma_factor 1.1。要更狠就上 1.2/1.3，但别跟柔光一起上太猛。
+SPEK_MORPH = True
+SPEK_MORPH_GAMMA = 1.10           # 整体 gamma（>1 = 曲线更陡、反差略提）
+SPEK_MORPH_FAST = 1.0             # "快"那层（颗粒最小的层）额外倍数
+SPEK_MORPH_SLOW = 1.0             # "慢"那层额外倍数
+SPEK_MORPH_EXHAUST = 0.0          # 显影疲劳（>0 把每层混向 Gumbel-max CDF，保中灰）
+
+# ② 柔光（`diffusion_filter`）—— **SV 选「A」= 挂放大机**
+#   两处都有这个开关：`camera.diffusion_filter`（RAW 域、曝光前、halation 之前）
+#                       `enlarger.diffusion_filter`（印相 raw 域、**颗粒形成之前**）
+#   ⇒ 挂放大机 = 光被化开之后颗粒仍是"新画的"（颗粒保锐）；挂相机则颗粒跟着一起柔。
+#   档位：1/8·1/4·1/2·1·2 对应散射能量 10/20/35/55/75%（**能量守恒**，不吸收）。
+#   ⚠ 单位换算依赖出图尺寸（`pixel_size_um`）：1100px 长边 ≈ 31.8 μm/px；2048px ≈ 17.1 μm/px。
+#   我们取值（SV 指定 1/4 档）：`strength=0.25` ⇒ BPM 族 p_s = 0.20×0.75 = **0.15**。
+#   ★ 实测中尺度柔度：关 9.72 → 黑柔1/4 9.03 → 黑柔1/2 8.55 → 黑柔1 7.98 → 电影1/2 6.18；
+#     **亮部全程 86.3 不动**。⚠ **大师（鹿井）= 11.19 ⇒ 我们本来已经比大师柔**，
+#     加柔光是**离大师更远的观感偏好**（SV 要的就是这个方向），照实记着。
+SPEK_DIFFUSION_ENLARGER = True    # ★ SV 选 A：挂放大机（颗粒保锐）
+SPEK_DIFFUSION_CAMERA = False     # 挂相机（RAW 域）→ 颗粒一起柔；SV 没选，留 False
+SPEK_DIFFUSION_FAMILY = 'black_pro_mist'   # 黑柔 BPM（另：glimmerglass / pro_mist / cinebloom）
+SPEK_DIFFUSION_STRENGTH = 0.25    # 1/4 档
+SPEK_DIFFUSION_SCALE = 1.0        # 空间尺度倍率（>1 = 大范围柔、<1 = 只柔细节）
+
+# ③ Halation 的高光增亮（`film_render.halation.boost_ev`）
+#   是什么：**入口 RAW 域**重建过曝高光（`boost_highlights`）——被相机压死的高光"补回来"，
+#     于是它们才有能量穿到胶片背面反射成**红橙晕圈**（halation 的燃料）。
+#   为什么关：`boost_ev=0` = 关；而且我们 schema 的 `protect_ev=4.0`（门槛 = 中灰0.184×2⁴ ≈ 2.94）
+#     通常比整张最大值还高 ⇒ **即便给 boost_ev 也够不到门槛、等于空气**。
+#   ⚠ **图像全局变换**（内部用 `np.max(x)` 归一）⇒ `debug.lut_mode` 必须 False（否则被清零）。
+#   我们取值：boost_ev 10（文档建议 ≤20），**同时把 protect_ev 降到 3.0**（口径才有效）。
+SPEK_BOOST_EV = 10.0
+SPEK_BOOST_RANGE = 0.3
+SPEK_BOOST_PROTECT_EV = 3.0       # ★ 从 4.0 降下来，否则上面那个 10 是空操作
+
+# ④ 预闪（`enlarger.preflash_exposure`，暗房技法）
+#   是什么：**不放底片、只让灯光透过胶片片基**先给相纸一点均匀曝光
+#     （`raw += raw_preflash × preflash_exposure`，加法偏置）。
+#   ★★ **09-14 实测：方向跟我的预期相反** —— 我以为「提黑位、降对比」，
+#     实测同一张图 portra400：**0.10 就让画面中位从 74.5 掉到 48.0、亮部 86.2→64.2**。
+#     机制：那层均匀光进了**印相 raw 域**，而印相是负片逻辑 —— 相纸多吃光 = 整张往下压。
+#   ⇒ **SV 选「A2」：先关掉**（等看过别的效果再决定）。要用的话量级得小一个数量级（0.01~0.02），
+#     或同时把 `print_exposure` 调亮抵消（那就只剩"对比变低"）。
+SPEK_PREFLASH = 0.0
+SPEK_PREFLASH_Y_SHIFT = 0.0       # 预闪偏黄（暖）；0 = 中性
+SPEK_PREFLASH_M_SHIFT = 0.0       # 预闪偏品红；0 = 中性
+
+# ⑤ 扫描白平衡 / 黑位校正（`scanner.white_correction` / `black_correction`）
+#   是什么：用**相纸的黑/白参考密度**做线性钳位（白点 0.98 / 黑点 0.01），把扫描端点摆正。
+#   ⚠ **它不只改端点**：为了保中灰 0.184 不动，它会**同时改印相曝光**
+#     （`black_white_printing_exposure_correction()`）⇒ **会连带推动整张落点**。
+#   我们取值：都 True（SV 点名要开）。落下后如果落点偏了，我重新配一次印相曝光。
+SPEK_SCAN_WHITE_CORR = True
+SPEK_SCAN_BLACK_CORR = True
+
+# ⑥ 镜头 / 放大机 / 扫描的像差模糊（三处 `lens_blur`）
+#   ⚠ **单位不同、而且有一处是死参数**：
+#     `camera.lens_blur_um` → `filming.py:67`，单位 **μm**，RAW 域（曝光后、halation 前）
+#     `scanner.lens_blur`   → `scanning.py:124`，单位是**像素**（不是 μm！），扫描 RGB 域
+#     `enlarger.lens_blur`  → ⚠ **整个 runtime 里没有任何应用点**（只有 digest 里清零它）
+#         ⇒ **打开它不会有任何视觉效果**，是源码级死参数。留着配置位、注释标明，不要指望它。
+#   我们取值：（SV 选「B2」= **加到看得见**，随后 **09-14 22:15 又降半**）
+#     相机端 **10 μm**（1100px 时 ≈ 0.31 px）；
+#     扫描端 **0.6 像素**。
+#   ★ 09-14 实测：早先的 2.5 μm / 0.4 px **几乎无效果**（全开与基线数值差 < 0.05）；
+#     20μm/1.2px 那版 SV 看完要求**降半** ⇒ 取现在这组（是 B2 的一半）。
+#   ⚠ **放大机那一处是死参数**：整个 runtime 里没有应用点（只有 digest 里清零它）⇒ 取 0。
+SPEK_CAMERA_LENS_BLUR_UM = 10.0
+SPEK_SCANNER_LENS_BLUR = 0.6
+SPEK_ENLARGER_LENS_BLUR = 0.0     # ⚠ 源码里无应用点，设了也没用（保留位）
+
 # ========== L4 护栏（只做"不许超过"，不做"必须等于"） ==========
 CAP_WHITE_FRAC = 0.030          # 死白（>=254）占比上限
 CAP_CHROMA_C90 = 45.0           # 彩度 P90 上限（Lab C）

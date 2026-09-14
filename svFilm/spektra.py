@@ -112,17 +112,86 @@ def render(lin, stock_name, cfg=C, print_exposure=None):
     film, printp = STOCK_MAP[stock_name]
     _init_params, simulate = _sf()
     p = _get_params(film, printp)
-    # 每次 simulate 前按需改（params 对象是复用的 ⇒ 要**还回去**，见下）
+
+    def _apply_kwargs():
+        r"""把「出厂关着、我们打开」的那几项从 cfg 推进 params。
+
+        ⚠ 必须在 `simulate` **之前**逐次设置（params 是复用的），跑完由 `finally` 还原。
+        ⚠ `simulate()` 默认每次跑 `digest_params`；我们这些字段**不在 digest 的覆盖名单里**
+          （preview_mode 清的是 lens_blur/grain/unsharp；lut_mode 清的是 spatial/boost_ev/
+           white·black_correction/unsharp）⇒ 只要 `settings.preview_mode` 与 `debug.lut_mode`
+          都是 False，我们设的值就能活到管线里。
+        """
+        # ① 印相曲线变形：改相纸曲线**形状**（保 D(0)/D_max/每层 A）
+        if getattr(cfg, 'SPEK_MORPH', False):
+            from spektrafilm.utils.morph_curves import PrintCurvesMorphParams
+            p.print_render.density_curves_morph = PrintCurvesMorphParams(
+                active=True,
+                gamma_factor=float(getattr(cfg, 'SPEK_MORPH_GAMMA', 1.0)),
+                gamma_factor_fast=float(getattr(cfg, 'SPEK_MORPH_FAST', 1.0)),
+                gamma_factor_slow=float(getattr(cfg, 'SPEK_MORPH_SLOW', 1.0)),
+                developer_exhaustion=float(getattr(cfg, 'SPEK_MORPH_EXHAUST', 0.0)),
+            )
+        # ② 柔光：SV 选「A」⇒ 挂**放大机**（印相 raw 域、颗粒形成之前 ⇒ 颗粒保锐）
+        _fam = getattr(cfg, 'SPEK_DIFFUSION_FAMILY', 'black_pro_mist')
+        _stg = float(getattr(cfg, 'SPEK_DIFFUSION_STRENGTH', 0.0))
+        _scl = float(getattr(cfg, 'SPEK_DIFFUSION_SCALE', 1.0))
+        p.enlarger.diffusion_filter.active = bool(getattr(cfg, 'SPEK_DIFFUSION_ENLARGER', False)) and _stg > 0
+        p.enlarger.diffusion_filter.filter_family = _fam
+        p.enlarger.diffusion_filter.strength = _stg
+        p.enlarger.diffusion_filter.spatial_scale = _scl
+        p.camera.diffusion_filter.active = bool(getattr(cfg, 'SPEK_DIFFUSION_CAMERA', False)) and _stg > 0
+        p.camera.diffusion_filter.filter_family = _fam
+        p.camera.diffusion_filter.strength = _stg
+        p.camera.diffusion_filter.spatial_scale = _scl
+        # ③ Halation 的高光增亮（**入口 RAW 域**重建过曝高光 = 晕圈的燃料）
+        #    ⚠ `protect_ev` 必须一起降下来，否则门槛够不到、boost 是空操作。
+        p.film_render.halation.boost_ev = float(getattr(cfg, 'SPEK_BOOST_EV', 0.0))
+        p.film_render.halation.boost_range = float(getattr(cfg, 'SPEK_BOOST_RANGE', 0.3))
+        p.film_render.halation.protect_ev = float(getattr(cfg, 'SPEK_BOOST_PROTECT_EV', 4.0))
+        # ④ 预闪（不放底片、片基光直打相纸）= 加法偏置 ⇒ 提黑位、降对比
+        p.enlarger.preflash_exposure = float(getattr(cfg, 'SPEK_PREFLASH', 0.0))
+        p.enlarger.preflash_y_filter_shift = float(getattr(cfg, 'SPEK_PREFLASH_Y_SHIFT', 0.0))
+        p.enlarger.preflash_m_filter_shift = float(getattr(cfg, 'SPEK_PREFLASH_M_SHIFT', 0.0))
+        # ⑤ 扫描白平衡 / 黑位校正（⚠ 会连带改印相曝光以保中灰 ⇒ 可能挪落点）
+        p.scanner.white_correction = bool(getattr(cfg, 'SPEK_SCAN_WHITE_CORR', False))
+        p.scanner.black_correction = bool(getattr(cfg, 'SPEK_SCAN_BLACK_CORR', False))
+        # ⑥ 像差模糊（⚠ 单位不同；`enlarger.lens_blur` 是死参数，设了也无效果）
+        p.camera.lens_blur_um = float(getattr(cfg, 'SPEK_CAMERA_LENS_BLUR_UM', 0.0))
+        p.scanner.lens_blur = float(getattr(cfg, 'SPEK_SCANNER_LENS_BLUR', 0.0))
+        p.enlarger.lens_blur = float(getattr(cfg, 'SPEK_ENLARGER_LENS_BLUR', 0.0))
+
+    # 每次 simulate 前按需改（params 对象是复用的 ⇒ 跑完要**还回去**）
     with _LOCK:
         old_pe = p.enlarger.print_exposure
         old_ae = p.camera.auto_exposure
         old_np = p.enlarger.normalize_print_exposure
         old_dc = p.film_render.dir_couplers.amount
+        # 还原用的深拷贝：⑥ 那几项要恢复原对象，最省事是**先拍快照**（只拍我们会碰的）
+        import copy as _copy
+        _snap = {
+            'morph': _copy.copy(p.print_render.density_curves_morph),
+            'enl_diff': _copy.copy(p.enlarger.diffusion_filter),
+            'cam_diff': _copy.copy(p.camera.diffusion_filter),
+            'boost_ev': p.film_render.halation.boost_ev,
+            'boost_range': p.film_render.halation.boost_range,
+            'protect_ev': p.film_render.halation.protect_ev,
+            'preflash': p.enlarger.preflash_exposure,
+            'preflash_y': p.enlarger.preflash_y_filter_shift,
+            'preflash_m': p.enlarger.preflash_m_filter_shift,
+            'white_corr': p.scanner.white_correction,
+            'black_corr': p.scanner.black_correction,
+            'cam_blur': p.camera.lens_blur_um,
+            'scan_blur': p.scanner.lens_blur,
+            'enl_blur': p.enlarger.lens_blur,
+        }
         try:
             # ★★ 浓淡旋钮（09-14 SV 选「A」）：层间抑制 = 彩度的物理来源。
             #   1.0 是出厂物理值；我们实测全批偏高 79%（12.13 vs 鹿井 6.79）⇒ 取 `SPEK_COUPLERS`。
             p.film_render.dir_couplers.amount = float(
                 getattr(cfg, 'SPEK_COUPLERS', old_dc))
+            # ★★ 出厂关着的暗房/光学效果（09-14 SV「都打开」）
+            _apply_kwargs()
             if print_exposure is not None:
                 p.camera.auto_exposure = False
                 p.enlarger.normalize_print_exposure = False
@@ -136,6 +205,21 @@ def render(lin, stock_name, cfg=C, print_exposure=None):
             p.camera.auto_exposure = old_ae
             p.enlarger.normalize_print_exposure = old_np
             p.film_render.dir_couplers.amount = old_dc
+            # 把上面打开的还回去（params 复用 ⇒ 不还原会污染下一卷/下一张）
+            p.print_render.density_curves_morph = _snap['morph']
+            p.enlarger.diffusion_filter = _snap['enl_diff']
+            p.camera.diffusion_filter = _snap['cam_diff']
+            p.film_render.halation.boost_ev = _snap['boost_ev']
+            p.film_render.halation.boost_range = _snap['boost_range']
+            p.film_render.halation.protect_ev = _snap['protect_ev']
+            p.enlarger.preflash_exposure = _snap['preflash']
+            p.enlarger.preflash_y_filter_shift = _snap['preflash_y']
+            p.enlarger.preflash_m_filter_shift = _snap['preflash_m']
+            p.scanner.white_correction = _snap['white_corr']
+            p.scanner.black_correction = _snap['black_corr']
+            p.camera.lens_blur_um = _snap['cam_blur']
+            p.scanner.lens_blur = _snap['scan_blur']
+            p.enlarger.lens_blur = _snap['enl_blur']
     return np.clip(np.asarray(out, np.float64), 0.0, 1.0)
 
 
