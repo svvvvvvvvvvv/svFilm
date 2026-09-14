@@ -83,13 +83,14 @@ def _load_one(path, side):
     return s, (time.perf_counter() - t) * 1000.0
 
 
-def _render_bytes(i, stock, base, side, fmt, quality):
+def _render_bytes(i, stock, base, side, fmt, quality, params=None):
     """出图。side 与缓存不一致时用缓存的（不重新解码）—— 前端要别的尺寸得重新 /load。"""
     row = _cache_get(i)
     if not row:
         return None, {'error': 'id 不在缓存里，先 /load'}
     s = row['sample']
-    r = pipeline.run_from(s, stock=stock or None, base=base or None)
+    with _Overrides(_parse_params(params)):
+        r = pipeline.run_from(s, stock=stock or None, base=base or None)
     disp = np.clip(r.disp, 0.0, 1.0)
     arr = (disp * 255.0 + 0.5).astype(np.uint8)
     if fmt in ('jpg', 'jpeg'):
@@ -106,11 +107,12 @@ def _render_bytes(i, stock, base, side, fmt, quality):
     return buf.getvalue(), {'ms': round(r.report.get('ms', 0)), 'mime': 'image/png'}
 
 
-def _stats_of(i, stock, base):
+def _stats_of(i, stock, base, params=None):
     row = _cache_get(i)
     if not row:
         return {'error': 'id 不在缓存里'}
-    r = pipeline.run_from(row['sample'], stock=stock or None, base=base or None)
+    with _Overrides(_parse_params(params)):
+        r = pipeline.run_from(row['sample'], stock=stock or None, base=base or None)
     from . import color
     lab = color.to_lab(np.clip(r.disp, 0, 1))
     L = lab[..., 0]
@@ -170,6 +172,38 @@ class _H(BaseHTTPRequestHandler):
                     out.append(dict(name=n, label=d.get('label') or n,
                                     desc=d.get('desc') or ''))
                 return self._json(out)
+            if u.path in ('/', '/index.html') and _WEB[0]:
+                # ★ 可选：把工作台的静态页 serve 出来（路径由 `--web` 给，**不写死** ⇒ 边界不破）
+                fp = os.path.join(_WEB[0], 'index.html')
+                if os.path.exists(fp):
+                    with open(fp, 'rb') as f:
+                        b = f.read()
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/html; charset=utf-8')
+                    self.send_header('Content-Length', str(len(b)))
+                    self.end_headers()
+                    self.wfile.write(b)
+                    return
+            if u.path == '/scan':
+                # 只列**用户指定的**目录（不自己去翻盘）—— 按 .RAF/.JPG 收，自然序排
+                d = q.get('dir') or ''
+                if not d or not os.path.isdir(d):
+                    return self._json({'error': '目录不存在: %s' % d}, 400)
+                exts = tuple('.' + e.strip().lower()
+                             for e in (q.get('ext') or 'raf,jpg,jpeg').split(',') if e.strip())
+                lim = int(q.get('limit') or 400)
+                ps = []
+                for n in sorted(os.listdir(d)):
+                    if n.lower().endswith(exts):
+                        ps.append(os.path.join(d, n).replace('\\', '/'))
+                return self._json(dict(dir=d, n=len(ps), files=ps[:lim]))
+            if u.path == '/params':
+                out = []
+                for p in PARAMS:
+                    d = dict(p)
+                    d['value'] = getattr(C, p['k'], None)
+                    out.append(d)
+                return self._json(out)
             if u.path == '/list':
                 with _cache_lock:
                     out = [dict(id=i, path=v['path'], side=v['side'])
@@ -192,28 +226,106 @@ class _H(BaseHTTPRequestHandler):
                 b, info = _render_bytes(int(q.get('id') or 0), q.get('stock'),
                                         q.get('base'), q.get('side'),
                                         (q.get('fmt') or 'jpg').lower(),
-                                        q.get('q') or 92)
+                                        q.get('q') or 92, q.get('params'))
                 if b is None:
                     return self._json(info, 404)
                 return self._img(b, info['mime'])
             if u.path == '/stats':
                 return self._json(_stats_of(int(q.get('id') or 0), q.get('stock'),
-                                            q.get('base')))
+                                            q.get('base'), q.get('params')))
             return self._json({'error': 'no such path', 'path': u.path}, 404)
         except Exception as e:                                    # noqa: BLE001
             return self._json({'error': '%s: %s' % (type(e).__name__, str(e)[:200])}, 500)
 
 
+# ---- ★ 通用参数口子：`params=KEY:VAL,KEY:VAL` 临时覆盖 config -------------------
+# 为什么这么做：**不用为每一个旋钮写代码**。前端只要知道「哪个参数、什么范围」，
+# 就能自动生成滑杆；引擎这边一个口子全接住。
+_param_lock = threading.Lock()
+
+# 允许被外部覆盖的前缀（**白名单**，防止前端乱改引擎契约里的东西）
+PARAM_PREFIX = ('TONE_', 'GRAIN_', 'BLOOM_', 'HALATION_', 'DENOISE_', 'WHITE_MICRO',
+                'FACE_', 'DENSITY_', 'CROSSTALK_', 'LAYER_', 'ENTRY_', 'SHADOW_',
+                'COLOR_', 'SKIN_', 'ANCHOR_', 'CAP_', 'SHARP_')
+
+# 不收白名单里的这些（结构性/开关类，乱改会破契约）
+PARAM_BLOCK = ('ENTRY_CURVE', 'ENTRY_SHOULDER_KIND', 'LUT_PATH', 'BASE', 'STOCK')
+
+
+def _parse_params(txt):
+    """`KEY:VAL,KEY:VAL` → dict。不合法/不在白名单的**静默丢掉**（不让前端报错卡住）。"""
+    out = {}
+    for seg in (txt or '').split(','):
+        if ':' not in seg:
+            continue
+        k, v = seg.split(':', 1)
+        k, v = k.strip(), v.strip()
+        if not k or k in PARAM_BLOCK:
+            continue
+        if not any(k.startswith(p) for p in PARAM_PREFIX):
+            continue
+        if not hasattr(C, k):
+            continue
+        cur = getattr(C, k)
+        if isinstance(cur, (int, float)) and not isinstance(cur, bool):
+            try:
+                out[k] = float(v)
+            except ValueError:
+                pass
+    return out
+
+
+class _Overrides:
+    """临时覆盖 config（**用完还原**）。常驻服务是多线程的 ⇒ 加锁。"""
+
+    def __init__(self, kv):
+        self.kv = kv or {}
+
+    def __enter__(self):
+        self.old = {}
+        _param_lock.acquire()
+        for k, v in self.kv.items():
+            self.old[k] = getattr(C, k)
+            cur = self.old[k]
+            setattr(C, k, int(round(v)) if isinstance(cur, int) else float(v))
+        return self
+
+    def __exit__(self, *a):
+        for k, v in self.old.items():
+            setattr(C, k, v)
+        _param_lock.release()
+        return False
+
+
+# ---- 前端要的「可调参数清单」（带范围）--------------------------------------
+# 只列**真值得给人拧的**那几个 —— 别把 config 里 200 个常量全倒出来。
+PARAMS = [
+    dict(k='TONE_LIFT',       name='中高调抬起',   lo=0,  hi=16,  step=0.5, d='整张变亮（也会带出高光肩部）'),
+    dict(k='TONE_TOE',        name='趾部压深',     lo=0,  hi=2.0, step=0.05, d='暗部压深的量'),
+    dict(k='TONE_SHOULDER',   name='高光肩部',     lo=0,  hi=6,   step=0.5, d='大 = 高光收得多；小 = 开顶'),
+    dict(k='GRAIN_AMOUNT',    name='颗粒',        lo=0,  hi=0.10, step=0.002, d='颗粒强度'),
+    dict(k='BLOOM_AMOUNT',    name='黑柔',        lo=0,  hi=0.20, step=0.005, d='高光溢出（黑柔）强度'),
+    dict(k='HALATION_AMOUNT', name='红橙晕圈',     lo=0,  hi=0.30, step=0.01, d='高光边缘的红橙光晕'),
+    dict(k='WHITE_MICRO',     name='白区层次',     lo=0,  hi=1.5, step=0.1, d='白衣服/白墙的微反差'),
+]
+_PARAM_KEYS = tuple(p['k'] for p in PARAMS)
+
+
 _CACHE_MAX = [DEFAULT_CACHE]
+_WEB = [None]        # --web <dir>：要不要顺手 serve 一个静态前端（可选）
 
 
-def serve(port=DEFAULT_PORT, host='127.0.0.1', cache=DEFAULT_CACHE):
+def serve(port=DEFAULT_PORT, host='127.0.0.1', cache=DEFAULT_CACHE, web=None):
     _CACHE_MAX[0] = int(cache)
+    _WEB[0] = web
     srv = ThreadingHTTPServer((host, int(port)), _H)
     srv.daemon_threads = True
     print('svFilm 服务已起： http://%s:%d   （缓存上限 %d 张，预览长边 %d）'
           % (host, port, _CACHE_MAX[0], DEFAULT_SIDE))
-    print('  试一下： curl "http://%s:%d/health"' % (host, port))
+    if web:
+        print('  工作台页面： http://%s:%d/   （静态目录 %s）' % (host, port, web))
+    else:
+        print('  试一下： curl "http://%s:%d/health"' % (host, port))
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -225,8 +337,10 @@ def main(argv=None):
     ap.add_argument('--port', type=int, default=DEFAULT_PORT)
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--cache', type=int, default=DEFAULT_CACHE)
+    ap.add_argument('--web', default=None,
+                    help='可选：顺手 serve 一个静态前端目录（例如 ../svStudio/web）')
     a = ap.parse_args(argv)
-    serve(a.port, a.host, a.cache)
+    serve(a.port, a.host, a.cache, a.web)
 
 
 if __name__ == '__main__':
