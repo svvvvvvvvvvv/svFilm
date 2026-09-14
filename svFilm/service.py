@@ -60,6 +60,13 @@ _cache = OrderedDict()      # id -> dict(sample=..., path=..., side=..., t=...)
 _cache_lock = threading.Lock()
 _next_id = [1]
 
+# ★ 按「路径+尺寸」缓存已解码的 Sample —— 前端重复 /load 同一张时直接命中，
+#   不再重新解码（RAW 一张 2.3 秒）。和上面的 id 缓存是两层：上面那层给 /render 用，
+#   这一层给「同一张图反复 /load」用（换模式、翻回来、重出图）。
+_path_cache = OrderedDict()
+_path_cache_lock = threading.Lock()
+_PATH_CACHE_MAX = [24]
+
 
 def _cache_put(path, side, sample):
     with _cache_lock:
@@ -77,10 +84,25 @@ def _cache_get(i):
 
 
 def _load_one(path, side):
-    """★ 慢的那一步（解码 + 入口 + 锚点）—— 只在这里做一次。"""
+    """★ 慢的那一步（解码 + 入口 + 锚点）—— 只在这里做一次。
+
+    ⚠ 必须**按「路径 + 尺寸」复用**：台子上换模式 / 翻回来 / 重新出图都会再喊一次 /load，
+      如果没有这一层，每次都要重新解码一遍（实测 RAW 2.3 秒）⇒ 前端就觉得"卡"。
+      之前这里每次都真解码（只有 `/render` 那一层缓存），是 09-14 SV 报「点调色台非常卡」的根因之一。
+    """
+    key = (os.path.abspath(path), int(side))
+    with _path_cache_lock:
+        hit = _path_cache.get(key)
+    if hit is not None:
+        return hit['sample'], 0.0
     t = time.perf_counter()
     s = io.load(path, side, src=None)
-    return s, (time.perf_counter() - t) * 1000.0
+    ms = (time.perf_counter() - t) * 1000.0
+    with _path_cache_lock:
+        _path_cache[key] = dict(sample=s, t=time.time())
+        while len(_path_cache) > _PATH_CACHE_MAX[0]:
+            _path_cache.popitem(last=False)
+    return s, ms
 
 
 def _render_bytes(i, stock, base, side, fmt, quality, params=None):
@@ -105,6 +127,29 @@ def _render_bytes(i, stock, base, side, fmt, quality, params=None):
     buf = _io.BytesIO()
     Image.fromarray(arr).save(buf, format='PNG')
     return buf.getvalue(), {'ms': round(r.report.get('ms', 0)), 'mime': 'image/png'}
+
+
+def _base_bytes(i, fmt='jpg', quality=92):
+    """「原图」栏用：把缓存的 Sample 直接出图 —— **不跑任何调色**（恒等）。
+
+    为什么不让前端去读原始 JPG：① 原始 JPG 的尺寸/方向跟渲染结果不是一把尺子，并排看会误导；
+    ② 走这里出来的影像与 `/render` **同分辨率、同口径**，A/B 才公平。
+    """
+    row = _cache_get(i)
+    if not row:
+        return None, {'error': 'id 不在缓存里，先 /load'}
+    disp = np.clip(row['sample'].disp, 0.0, 1.0)
+    arr = (disp * 255.0 + 0.5).astype(np.uint8)
+    from PIL import Image
+    import io as _io
+    buf = _io.BytesIO()
+    if str(fmt).lower() in ('png',):
+        Image.fromarray(arr).save(buf, format='PNG')
+        mime = 'image/png'
+    else:
+        Image.fromarray(arr).save(buf, format='JPEG', quality=int(quality))
+        mime = 'image/jpeg'
+    return buf.getvalue(), {'mime': mime, 'w': int(disp.shape[1]), 'h': int(disp.shape[0])}
 
 
 def _stats_of(i, stock, base, params=None):
@@ -227,6 +272,13 @@ class _H(BaseHTTPRequestHandler):
                     s, ms = _load_one(p, side)
                     out.append(dict(id=_cache_put(p, side, s), path=p, ms=round(ms)))
                 return self._json(out)
+            if u.path == '/base':
+                # 「原图」栏：缓存里的 Sample 直接出图（恒等、不跑调色）
+                b, info = _base_bytes(int(q.get('id') or 0),
+                                      q.get('fmt') or 'jpg', q.get('q') or 92)
+                if b is None:
+                    return self._json(info, 404)
+                return self._img(b, info['mime'])
             if u.path == '/render':
                 b, info = _render_bytes(int(q.get('id') or 0), q.get('stock'),
                                         q.get('base'), q.get('side'),
