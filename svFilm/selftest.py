@@ -1359,6 +1359,15 @@ def t_l4_caps():
               44.0 < Lf < 49.0, 'L脸=%.1f' % Lf)
         d, ai = io.anchor_ev(img3, C, masks=dict(face_skin=fk))
         check('锚点：脸比 68 暗 ⇒ d_ev > 0（要提亮）', d > 0, 'd_ev=%+.3f' % d)
+        # ★ 只提不压（SV 09-14 选「甲」）：脸已经够亮 ⇒ 0，逐位不变
+        bright = np.full((8, 256, 3), 0.72, np.float32)          # 显示值 0.72 ⇒ L* ≈ 88
+        Lb2 = float(np.median(color.L_of_lin(color.Y_of(color.s2l(bright)))))
+        d2, i2 = io.anchor_ev(bright, C, masks=dict(face_skin=fk))
+        check('锚点·只提不压：脸已经够亮（%.0f > 68）⇒ d_ev = 0，不压它' % Lb2,
+              d2 == 0.0 and i2.get('applied') is False,
+              'd_ev=%+.3f reason=%s' % (d2, i2.get('reason')))
+        check('接线：ANCHOR_ONLY_UP 出厂为真（不写死两个方向）',
+              bool(C.ANCHOR_ONLY_UP) is True and 'ANCHOR_ONLY_UP' in inspect.getsource(io.anchor_ev))
         out = io.refocus(color.s2l(img3), d, C)
         La = color.L_of_lin(color.Y_of(np.clip(out, 0.0, None)))
         check('锚点：重打之后脸真的落到 68（±1.5）',

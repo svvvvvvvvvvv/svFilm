@@ -278,6 +278,10 @@ def anchor_ev(disp, cfg=C, masks=None):
     tgt = float(getattr(cfg, 'ANCHOR_FACE_L', 68.0))
     g = max(float(getattr(cfg, 'ENTRY_GAMMA', 1.0)), 1e-6)
     raw = (3.0 / g) * float(np.log2(max(tgt + 16.0, 1e-6) / max(Lf + 16.0, 1e-6)))
+    # ★ 只提不压（09-14 SV 选「甲」）：脸已经够亮 ⇒ 一个像素都不动。
+    if bool(getattr(cfg, 'ANCHOR_ONLY_UP', True)) and raw <= 0.0:
+        info.update(reason='already_bright', face_L_before=Lf, face_L_target=tgt, n_face=n)
+        return 0.0, info
     cap = float(getattr(cfg, 'ANCHOR_EV_MAX', 2.0))
     d_ev = float(np.clip(raw, -cap, cap))
     info.update(applied=True, face_L_before=Lf, face_L_target=tgt,
