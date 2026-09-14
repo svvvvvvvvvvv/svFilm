@@ -1176,9 +1176,8 @@ def t_film_color():
     print('[真胶片成色：丙串扰 / 甲分通道 / 乙密度引擎]')
     check('丙 串扰：出厂开着，强度 = LIMO 给 Portra 400 标的 0.38',
           bool(C.CROSSTALK_ENABLE) is True and abs(float(C.CROSSTALK_AMOUNT) - 0.38) < 1e-9)
-    check('甲 分通道：出厂开着，层感光度 = LIMO 的 (0.96, 1.0, 1.03)',
-          bool(C.LAYER_SPEED_ENABLE) is True
-          and tuple(np.round(C.LAYER_SPEEDS, 3)) == (0.96, 1.0, 1.03))
+    check('甲 分通道：★★ 出厂**关掉**（它是整体 gamma，会同时污染 b*/彩度 ⇒ 方向性错误）',
+          bool(C.LAYER_SPEED_ENABLE) is False)
     check('乙 密度引擎：出厂开着；**按参考实现只混 ≤50%**（Emulsifier `opacity = strength×0.5`）',
           bool(C.DENSITY_ENABLE) is True and 0.0 < float(C.DENSITY_STRENGTH) <= 0.5)
 
@@ -1254,6 +1253,13 @@ def t_film_color():
     check('接线：style._builtin 里三块都接上了',
           all(k in inspect.getsource(style._builtin)
               for k in ('film.layer_speeds', 'film.crosstalk', 'film.density')))
+    # ★★ 09-14 逐层追踪抓到的 bug：乙 会把**入口交出来的近白全部砍平**
+    #   （实测 0304 12.63%→0、0774 15.76%→0），白区层次也被压 ⇒ 表现是"白的东西不白、发肉"。
+    #   ⇒ 修法 = **乙 在高光端淡出**（高光交给入口 + 影调曲线）。这条守卫不许被"简化"掉。
+    _src = inspect.getsource(style._builtin)
+    check('★ 乙 在高光端淡出（DENSITY_FADE_LO/HI + blend_map）—— 不许砍平近白',
+          'DENSITY_FADE_LO' in _src and 'blend_map' in _src
+          and float(getattr(C, 'DENSITY_FADE_HI', 1.0)) < 1.0)
 
 
 def main():

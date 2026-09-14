@@ -211,7 +211,15 @@ def _builtin(disp, cfg, stock=None, base=None):
         if _dens_w > 0.0:
             _d = film.density(out, p.get('density_stock') or getattr(cfg, 'DENSITY_STOCK', 'portra400'),
                               cfg=cfg)
-            out = film.blend(out, _d, _dens_w)
+            # ★★ 09-14 修（逐层追踪抓到的）：**乙 在高光端必须淡出**。
+            #   不加这一条，它会把**入口交出来的近白全部砍平**（实测 0304 12.63%→0、0774 15.76%→0），
+            #   顺带把白区的层次压掉（0350 2.80→1.84）—— 表现就是"白的东西不白、发肉"。
+            #   物理上也讲得通：密度曲线是**整段**的，但我们只是拿它当"中间调/暗部的成色"，
+            #   高光该留给入口+影调曲线自己那条肩部。
+            _lo = float(getattr(cfg, 'DENSITY_FADE_LO', 0.72))
+            _hi = float(getattr(cfg, 'DENSITY_FADE_HI', 0.94))
+            _fade = 1.0 - color.smoothstep(color.luma(out), _lo, _hi)
+            out = film.blend_map(out, _d, _dens_w * _fade)
 
     has_tone = _tone_on(p)
     has_tint = (abs(p['a']) + abs(p['b']) + abs(p['b_sh']) + abs(p['b_hi'])) > 1e-6

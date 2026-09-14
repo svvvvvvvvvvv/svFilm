@@ -206,3 +206,8 @@ def blend(a, b, w):
     """把 b 按权重 w 混到 a 上（w=0 ⇒ 逐位等于 a）。"""
     w = float(np.clip(w, 0.0, 1.0))
     return a if w <= 1e-6 else a * (1.0 - w) + b * w
+
+
+def blend_map(a, b, w):
+    """同 `blend`，但权重是**逐像素的图**（用来让某一块淡出）。"""
+    return a + (b - a) * w[..., None]

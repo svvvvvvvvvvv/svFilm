@@ -392,8 +392,15 @@ FILM_COLOR_W = 1.0           # 0 = 三块全关（逐位等于老颜色路）
 CROSSTALK_ENABLE = True
 CROSSTALK_AMOUNT = 0.38          # LIMO 给 Portra 400 标的值（0 = 恒等）
 CROSSTALK_CROSSOVERS = (0.25, 0.55, 0.88)   # 暗/中/亮 三段分界（LIMO `layerCrossovers`）
-# ---- 【甲】分通道响应（三层乳剂感光度不同）----
-LAYER_SPEED_ENABLE = True
+# ---- 【甲】分通道响应（三层乳剂感光度不同）---- ★★ 09-14 出厂**关掉**
+# 为什么关：物理上「三层感光度不同」= **每层的曝光量不同** = 在曝光轴上**平移**，
+#   不是改 gamma。我们却把它实现成了 `rgb ** (1/speeds)`（整体 gamma）⇒ 它同时改
+#   红绿(a\*)、黄蓝(b\*)、彩度三个量。实测扫 speeds：把 a\* 从 −3.2 调到 −0.6（对上鹿井的 −0.48）
+#   的代价是 **b\* 从 +6.8 飙到 +13.5**（鹿井 0.00）、**彩度90 从 28.6 涨到 34.8**（鹿井 21.3）。
+#   ⇒ 拿它去解一个 a\* 靶必然把 b\* 和彩度带跑，**方向性错误**。
+# ★ 那个"平移"在【乙】的**印相分通道曝光**里已经**正确做过了** ⇒ 甲 多余。
+#   （代码留着，要试就把这个开关打开；speeds 建议给 (1,1,1) 起步。）
+LAYER_SPEED_ENABLE = False
 LAYER_SPEEDS = (0.96, 1.0, 1.03)  # R/G/B：红层稍慢、蓝层稍快（LIMO 给 Portra 400 的标定）
 LAYER_SPEED_STRENGTH = 1.0        # 朝 1.0 插值（0 = 恒等）
 # ---- 【乙】完整密度引擎（log 曝光 → 三条密度曲线 → 透射率）----
@@ -401,6 +408,8 @@ DENSITY_ENABLE = True
 DENSITY_STOCK = 'portra400'      # 用哪条实测曲线（`data/stocks_measured/*.json` + `data/*_char.csv`）
 DENSITY_SCALAR = 0.60            # 密度缩放（Emulsifier 原值）
 DENSITY_STRENGTH = 0.35
+DENSITY_FADE_LO = 0.72            # ★ 乙 从这开始淡出（显示域亮度）
+DENSITY_FADE_HI = 0.94            #   到这里 = 完全交还给入口/影调曲线（保近白与白区层次）
 DENSITY_LOGE_SCALE = 0.8         # log 曝光轴缩放（≈ 印相反差）：把画面铺进胶片曲线的陡部
 
 # ========== 降噪（RAW 提亮后暗部色斑/噪点） ==========
