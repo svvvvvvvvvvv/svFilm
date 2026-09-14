@@ -159,10 +159,15 @@ class _H(BaseHTTPRequestHandler):
                 return self._json(dict(ok=True, version=VERSION, cached=n,
                                        side=DEFAULT_SIDE))
             if u.path == '/stocks':
+                # ★ 卷列表从引擎取（`stocks.NAMES`）—— 别在这里写死名字：
+                #   09-14 出过 bug：`air` 从卷表删掉后，这里还在点名它 ⇒
+                #   `stocks.get('air')` 抛 KeyError ⇒ /stocks 直接 500。
                 out = []
-                for n in ('neutral', 'portra400', 'pro400h', 'fuji_c200',
-                          'ektar100', 'cinestill800t', 'air'):
-                    s = stocks.get(n) or {}
+                for n in stocks.NAMES:
+                    try:
+                        s = stocks.get(n) or {}
+                    except KeyError:
+                        continue
                     out.append(dict(name=n, label=s.get('label') or n,
                                     desc=s.get('desc') or ''))
                 return self._json(out)
